@@ -397,10 +397,11 @@ export default function App() {
 
   const processAudioFile = useCallback(
     async (file: File) => {
+      synthRef.current?.ensureContext();
       stopPlayback(true);
       setAnalysisState({
         active: true,
-        progress: 0.03,
+        progress: 0.02,
         stage: `Cargando "${file.name}"...`,
         error: null,
       });

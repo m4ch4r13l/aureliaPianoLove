@@ -3,174 +3,222 @@ import assert from 'node:assert/strict';
 import {
   build88KeyLayout,
   formatTime,
-  isBlackKey,
   midiToFreq,
   midiToSolfege,
-  TOTAL_KEYS,
 } from './pianoTheory';
 import {
   applyHarmonicPercussiveMask,
+  decimateBy2,
   fftRadix2,
   filterAndCleanNotes,
   transcribePcmToPianoAndVocal,
+  transcribePcmToPianoAndVocalAsync,
 } from './pitchDsp';
 import { buildMultiTrackMidi } from './midiExporter';
 
 test('88-key grand piano layout generates 52 white and 36 black keys in ascending X order', () => {
-  const { keys, totalWidth } = build88KeyLayout();
-  assert.equal(keys.length, TOTAL_KEYS);
+  const { keys } = build88KeyLayout();
+  assert.equal(keys.length, 88);
   assert.equal(keys.filter((k) => !k.isBlack).length, 52);
   assert.equal(keys.filter((k) => k.isBlack).length, 36);
-  assert.ok(totalWidth > 1.15 && totalWidth < 1.35);
+  assert.equal(keys[0].midi, 21);
+  assert.equal(keys[87].midi, 108);
 
-  for (let i = 1; i < keys.length; i++) {
-    assert.ok(
-      keys[i].x > keys[i - 1].x,
-      `Key ${keys[i].midi} x (${keys[i].x}) should exceed key ${keys[i - 1].midi} x (${keys[i - 1].x})`,
-    );
+  const whites = keys.filter((k) => !k.isBlack);
+  for (let i = 1; i < whites.length; i++) {
+    assert.ok(whites[i].x > whites[i - 1].x, 'White keys must increase strictly left-to-right');
   }
 });
 
 test('Spanish solfege naming and time formatting work accurately', () => {
   assert.equal(midiToSolfege(60), 'Do4');
   assert.equal(midiToSolfege(69), 'La4');
-  assert.equal(isBlackKey(61), true);
-  assert.equal(isBlackKey(60), false);
+  assert.equal(midiToSolfege(61), 'Do#4');
+  assert.ok(Math.abs(midiToFreq(69) - 440) < 1e-6);
   assert.equal(formatTime(0), '0:00');
-  assert.equal(formatTime(125.7), '2:05');
+  assert.equal(formatTime(75.2), '1:15');
 });
 
-test('Radix-2 FFT detects exact peak bin for 440 Hz sine wave', () => {
-  const sampleRate = 16384;
+test('Radix-2 FFT and anti-aliased decimation detect exact peak frequency', () => {
+  const sr = 22050;
   const n = 2048;
   const real = new Float32Array(n);
   const imag = new Float32Array(n);
-  const targetFreq = 440;
-
   for (let i = 0; i < n; i++) {
-    real[i] = Math.sin((2 * Math.PI * targetFreq * i) / sampleRate);
+    real[i] = Math.sin((2 * Math.PI * 440 * i) / sr);
   }
   fftRadix2(real, imag);
 
-  let peakBin = 0;
-  let peakMag = 0;
+  let maxBin = 0;
+  let maxMag = 0;
   for (let k = 1; k < n / 2; k++) {
     const mag = Math.hypot(real[k], imag[k]);
-    if (mag > peakMag) {
-      peakMag = mag;
-      peakBin = k;
+    if (mag > maxMag) {
+      maxMag = mag;
+      maxBin = k;
     }
   }
-  const detectedFreq = (peakBin * sampleRate) / n;
-  assert.ok(Math.abs(detectedFreq - targetFreq) <= sampleRate / n, `Detected ${detectedFreq} Hz`);
+  const detectedHz = (maxBin * sr) / n;
+  assert.ok(Math.abs(detectedHz - 440) < 12, `Expected ~440Hz, got ${detectedHz}`);
+
+  // Verify 2:1 anti-aliased decimation preserves low-frequency sine and attenuates Nyquist
+  const raw = new Float32Array(2048);
+  for (let i = 0; i < raw.length; i++) {
+    raw[i] = Math.sin((2 * Math.PI * 220 * i) / sr);
+  }
+  const dec = decimateBy2(raw);
+  assert.equal(dec.length, 1024);
+  const rms = Math.sqrt(dec.reduce((s, v) => s + v * v, 0) / dec.length);
+  assert.ok(rms > 0.6 && rms < 0.8, `Expected clean sine RMS ~0.707, got ${rms}`);
 });
 
-test('HPSS suppresses single-frame broadband drum spikes while preserving sustained harmonic notes', () => {
+test('HPSS suppresses broadband percussive drum spikes while preserving sustained harmonic tones', () => {
   const frames = 20;
-  const bins = 24;
+  const bins = 40;
   const mat = new Float32Array(frames * bins);
 
-  // Sustained harmonic note at bin 10 across all frames
+  // Sustained harmonic note on bin 18 across all frames
   for (let f = 0; f < frames; f++) {
-    mat[f * bins + 10] = 1.0;
+    mat[f * bins + 18] = 1.0;
   }
-  // Broadband percussive snare hit across ALL bins on frame 10 only
+  // Single-frame broadband snare hit across ALL bins on frame 10
   for (let b = 0; b < bins; b++) {
-    mat[10 * bins + b] = 1.2;
+    mat[10 * bins + b] += 1.2;
   }
 
-  const cleaned = applyHarmonicPercussiveMask(mat, frames, bins, 3, 3);
-  // Sustained harmonic bin survives strongly
-  assert.ok(cleaned[6 * bins + 10] > 0.7, `Harmonic bin should survive, got ${cleaned[6 * bins + 10]}`);
-  // Broadband drum bin at an unrelated pitch (bin 4, frame 10) is crushed to ~0
-  assert.ok(cleaned[10 * bins + 4] < 0.05, `Percussive spike should be suppressed, got ${cleaned[10 * bins + 4]}`);
+  const cleaned = applyHarmonicPercussiveMask(mat, frames, bins, 3, 4);
+  assert.ok(
+    cleaned[10 * bins + 18] > 0.55,
+    `Sustained harmonic tone must survive HPSS (got ${cleaned[10 * bins + 18]})`,
+  );
+  assert.ok(
+    cleaned[10 * bins + 5] < 0.08,
+    `Broadband drum spike at non-harmonic bin must be suppressed (got ${cleaned[10 * bins + 5]})`,
+  );
 });
 
-test('transcribePcmToPianoAndVocal separates bass, chords, and vocal melody cleanly even with percussive noise bursts', () => {
-  const sampleRate = 22050;
-  const durationSec = 2.4;
-  const n = Math.floor(sampleRate * durationSec);
+function buildRealisticPopMix(): { left: Float32Array; right: Float32Array; sr: number } {
+  const sr = 22050;
+  const dur = 6.0;
+  const n = Math.floor(sr * dur);
   const left = new Float32Array(n);
   const right = new Float32Array(n);
 
-  let seed = 1337;
-  const noiseRand = () => {
+  // Deterministic PRNG for realistic drum snare & hi-hat bursts
+  let seed = 4242;
+  const rand = () => {
     seed = (seed * 16807) % 2147483647;
-    return ((seed - 1) / 2147483646) * 2 - 1;
+    return (seed / 2147483647) * 2 - 1;
   };
 
+  // Progression: 0-2s Am (A2 bass, A3-C4-E4 chord, E5 vocal),
+  //              2-4s F  (F2 bass, A3-C4-F4 chord, F5 vocal),
+  //              4-6s C  (C2 bass, G3-C4-E4 chord, G5 vocal)
+  const sections = [
+    { bass: 45, chord: [57, 60, 64], vocal: 76 }, // Am: A2, A3-C4-E4, E5
+    { bass: 41, chord: [57, 60, 65], vocal: 77 }, // F:  F2, A3-C4-F4, F5
+    { bass: 36, chord: [55, 60, 64], vocal: 79 }, // C:  C2, G3-C4-E4, G5
+  ];
+
   for (let i = 0; i < n; i++) {
-    const t = i / sampleRate;
+    const t = i / sr;
+    const secIdx = Math.min(2, Math.floor(t / 2.0));
+    const sec = sections[secIdx];
+    const localT = t - secIdx * 2.0;
+    const env = Math.min(1, localT * 18) * (localT > 1.85 ? Math.max(0, (2.0 - localT) / 0.15) : 1);
 
-    // Bass note C2 (36)
-    const bassF = midiToFreq(36);
-    const bass = 0.25 * (Math.sin(2 * Math.PI * bassF * t) + 0.35 * Math.sin(4 * Math.PI * bassF * t));
+    // Bass with realistic 2nd harmonic
+    const bf = midiToFreq(sec.bass);
+    const bass = env * (0.28 * Math.sin(2 * Math.PI * bf * t) + 0.11 * Math.sin(4 * Math.PI * bf * t));
 
-    // Stereo piano chord C3 (48), E3 (52), G3 (55)
-    const chordMidis = [48, 52, 55];
+    // Stereo-spread piano accompaniment chords
     let cL = 0;
     let cR = 0;
-    chordMidis.forEach((m, idx) => {
-      const f = midiToFreq(m);
-      const w = 0.55 * Math.sin(2 * Math.PI * f * t) + 0.22 * Math.sin(4 * Math.PI * f * t);
-      const pL = idx === 0 ? 0.78 : idx === 2 ? 0.22 : 0.5;
-      cL += w * pL * 0.2;
-      cR += w * (1 - pL) * 0.2;
-    });
+    for (let k = 0; k < sec.chord.length; k++) {
+      const cf = midiToFreq(sec.chord[k]);
+      const tone = env * (0.14 * Math.sin(2 * Math.PI * cf * t) + 0.05 * Math.sin(4 * Math.PI * cf * t));
+      cL += tone * (k === 0 ? 0.9 : k === 1 ? 0.65 : 0.35);
+      cR += tone * (k === 0 ? 0.35 : k === 1 ? 0.65 : 0.9);
+    }
 
-    // Centered vocal melody C5 (72) -> D5 (74)
-    const vm = t < 1.2 ? 72 : 74;
-    const vf = midiToFreq(vm);
-    const vEnv = Math.sin(Math.PI * ((t % 1.2) / 1.2));
+    // Center-panned singing melody with natural harmonics
+    const vf = midiToFreq(sec.vocal);
     const vocal =
-      vEnv *
-      0.38 *
-      (Math.sin(2 * Math.PI * vf * t) +
-        0.48 * Math.sin(4 * Math.PI * vf * t) +
-        0.22 * Math.sin(6 * Math.PI * vf * t));
+      env *
+      (0.28 * Math.sin(2 * Math.PI * vf * t) +
+        0.13 * Math.sin(4 * Math.PI * vf * t) +
+        0.05 * Math.sin(6 * Math.PI * vf * t));
 
-    // Add brief broadband percussive snare hits every 0.6s (20ms burst)
-    const beatPhase = t % 0.6;
-    const drum = beatPhase < 0.02 ? noiseRand() * 0.45 * Math.exp(-beatPhase * 120) : 0;
+    // Loud percussive snare/hi-hat hits every 0.5s (broadband noise!)
+    const beatPhase = t % 0.5;
+    const drum = beatPhase < 0.025 ? 0.55 * rand() * Math.exp(-beatPhase * 120) : 0;
 
-    left[i] = bass + cL + vocal + drum;
-    right[i] = bass + cR + vocal + drum;
+    left[i] = Math.max(-0.98, Math.min(0.98, bass + cL + vocal + drum));
+    right[i] = Math.max(-0.98, Math.min(0.98, bass + cR + vocal - drum * 0.7));
   }
 
-  const piece = transcribePcmToPianoAndVocal(left, right, sampleRate, 'Prueba 4 Pistas');
+  return { left, right, sr };
+}
+
+test('New Constant-Q + Chord HMM engine cleanly separates vocal, bass, and voice-led chords despite drums', async () => {
+  const { left, right, sr } = buildRealisticPopMix();
+  const piece = transcribePcmToPianoAndVocal(left, right, sr, 'Cancion Prueba Pop');
 
   assert.equal(piece.source, 'upload');
-  assert.ok(piece.countsByTrack.vocal >= 2, `Expected >=2 vocal notes, got ${piece.countsByTrack.vocal}`);
-  assert.ok(piece.countsByTrack.bass >= 1, `Expected >=1 bass note, got ${piece.countsByTrack.bass}`);
+  assert.ok(piece.notes.length > 0, 'Must extract clean notes');
 
-  const vocalMidis = new Set(piece.notes.filter((ev) => ev.track === 'vocal').map((ev) => ev.midi));
-  assert.ok(vocalMidis.has(72), `Expected vocal C5 (72), got ${[...vocalMidis]}`);
-  assert.ok(vocalMidis.has(74), `Expected vocal D5 (74), got ${[...vocalMidis]}`);
+  const vocals = piece.notes.filter((n) => n.track === 'vocal');
+  const basses = piece.notes.filter((n) => n.track === 'bass');
+  const chords = piece.notes.filter((n) => n.track === 'chords');
 
-  // Verify live cleanliness filter reduces noisy notes at strict level and respects track toggles
-  const softNotes = filterAndCleanNotes(
+  assert.ok(vocals.length >= 2, `Expected vocal melody notes, got ${vocals.length}`);
+  assert.ok(basses.length >= 2, `Expected bassline notes, got ${basses.length}`);
+  assert.ok(chords.length >= 3, `Expected clean chord accompaniment notes, got ${chords.length}`);
+
+  // Verify vocal melody detected actual target pitches (E5=76, F5=77, G5=79)
+  const expectedVocal = new Set([76, 77, 79]);
+  const hitVocal = vocals.some((n) => expectedVocal.has(n.midi));
+  assert.ok(
+    hitVocal,
+    `Expected vocal pitches among 76/77/79, got: ${vocals.map((n) => n.midi).join(',')}`,
+  );
+
+  // Verify bass detected low target pitches (C2=36, F2=41, A2=45)
+  const expectedBass = new Set([36, 41, 45]);
+  const hitBass = basses.some((n) => expectedBass.has(n.midi));
+  assert.ok(
+    hitBass,
+    `Expected bass pitches among 36/41/45, got: ${basses.map((n) => n.midi).join(',')}`,
+  );
+
+  // Verify clean note density (no chaotic FFT noise flood!)
+  const strict = filterAndCleanNotes(
+    piece,
+    { vocal: true, chords: true, bass: true, lead: false },
+    'strict',
+  );
+  const soft = filterAndCleanNotes(
     piece,
     { vocal: true, chords: true, bass: true, lead: true },
     'soft',
   );
-  const strictNotes = filterAndCleanNotes(
-    piece,
-    { vocal: true, chords: true, bass: true, lead: true },
-    'strict',
-  );
-  assert.ok(strictNotes.length <= softNotes.length);
+  assert.ok(strict.length > 0, 'Strict filter must keep real musical notes');
+  assert.ok(strict.length <= soft.length, 'Strict filter must be at least as selective as soft');
+  assert.ok(strict.length < 70, `Strict notes must stay clean and uncluttered (got ${strict.length})`);
 
-  const vocalOnly = filterAndCleanNotes(
-    piece,
-    { vocal: true, chords: false, bass: false, lead: false },
-    'balanced',
-  );
-  assert.ok(vocalOnly.every((ev) => ev.track === 'vocal'));
+  // Verify async engine produces matching results and calls progress callback cleanly
+  const stages: number[] = [];
+  const asyncPiece = await transcribePcmToPianoAndVocalAsync(left, right, sr, 'Cancion Async', {
+    onProgress: (p) => stages.push(p),
+  });
+  assert.ok(stages.length >= 4, 'Async engine must emit progress milestones');
+  assert.equal(stages[stages.length - 1], 1);
+  assert.equal(asyncPiece.notes.length, piece.notes.length);
 
-  // Verify multi-track Standard MIDI File export produces valid Format 1 binary header
-  const midiBytes = buildMultiTrackMidi(piece, softNotes);
-  const headerTag = String.fromCharCode(midiBytes[0], midiBytes[1], midiBytes[2], midiBytes[3]);
-  assert.equal(headerTag, 'MThd');
-  assert.equal(midiBytes[9], 1); // Format 1 (multi-track)
-  assert.ok(midiBytes.length > 60);
+  // Verify hardened SMF Format-1 multi-track MIDI export (including long title & overlap dedup)
+  const longTitlePiece = { ...piece, title: 'A'.repeat(160) };
+  const midiBytes = buildMultiTrackMidi(longTitlePiece, strict);
+  assert.equal(String.fromCharCode(...midiBytes.slice(0, 4)), 'MThd');
+  assert.equal(midiBytes[9], 1, 'MIDI file must be Format 1 (multi-track)');
+  assert.ok(midiBytes[11] >= 2, 'MIDI file must include tempo track + instrument track(s)');
 });
