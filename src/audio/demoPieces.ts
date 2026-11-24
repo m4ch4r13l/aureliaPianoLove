@@ -1,8 +1,9 @@
-import { PianoNoteEvent, TranscribedPiece } from './pitchDsp';
+import { PianoNoteEvent, TrackRole, TranscribedPiece } from './pitchDsp';
 
 interface MeasureChord {
   bass: number[];
-  harmony: number[];
+  chords: number[];
+  lead: Array<{ beat: number; midi: number; dur: number }>;
   melody: Array<{ beat: number; midi: number; dur: number; vel?: number }>;
 }
 
@@ -12,6 +13,8 @@ function compileScore(
   subtitle: string,
   bpm: number,
   keySignature: string,
+  keyRoot: number,
+  keyMode: 'major' | 'minor',
   beatsPerMeasure: number,
   measures: MeasureChord[],
 ): TranscribedPiece {
@@ -22,32 +25,50 @@ function compileScore(
   measures.forEach((m, mIdx) => {
     const barStart = mIdx * beatsPerMeasure * beatSec;
 
-    // Arpeggiated left-hand bass & inner accompaniment
+    // Monophonic warm bass foundation
     m.bass.forEach((midi, i) => {
-      const startTime = barStart + i * 0.5 * beatSec;
+      const startTime = barStart + i * (beatsPerMeasure / Math.max(1, m.bass.length)) * beatSec;
       notes.push({
-        id: `${id}-p-${seq++}`,
+        id: `${id}-b-${seq++}`,
         midi,
         startTime: Number(startTime.toFixed(3)),
-        duration: Number((beatSec * (i === 0 ? beatsPerMeasure * 0.85 : 1.35)).toFixed(3)),
-        velocity: i === 0 ? 0.66 : 0.48,
-        track: 'piano',
+        duration: Number((beatSec * (beatsPerMeasure / Math.max(1, m.bass.length)) * 0.92).toFixed(3)),
+        velocity: i === 0 ? 0.68 : 0.56,
+        track: 'bass',
+        confidence: 1,
+        inKey: true,
       });
     });
 
-    // Warm chord voicing on middle beats
-    m.harmony.forEach((midi, idx) => {
-      const startTime = barStart + (idx % 2 === 0 ? 1.0 : 2.5) * beatSec;
+    // Piano mid-register chord arpeggio / voicing
+    m.chords.forEach((midi, idx) => {
+      const startTime = barStart + idx * 0.5 * beatSec;
       if (startTime < (mIdx + 1) * beatsPerMeasure * beatSec) {
         notes.push({
-          id: `${id}-h-${seq++}`,
+          id: `${id}-c-${seq++}`,
           midi,
           startTime: Number(startTime.toFixed(3)),
-          duration: Number((beatSec * 1.45).toFixed(3)),
-          velocity: 0.44,
-          track: 'piano',
+          duration: Number((beatSec * 1.35).toFixed(3)),
+          velocity: 0.46,
+          track: 'chords',
+          confidence: 1,
+          inKey: true,
         });
       }
+    });
+
+    // Subtle counter-melody / upper arpeggio detail
+    m.lead.forEach((note) => {
+      notes.push({
+        id: `${id}-l-${seq++}`,
+        midi: note.midi,
+        startTime: Number((barStart + note.beat * beatSec).toFixed(3)),
+        duration: Number((note.dur * beatSec).toFixed(3)),
+        velocity: 0.54,
+        track: 'lead',
+        confidence: 1,
+        inKey: true,
+      });
     });
 
     // Expressive cantabile vocal melody line
@@ -59,14 +80,20 @@ function compileScore(
         duration: Number((note.dur * beatSec).toFixed(3)),
         velocity: note.vel ?? 0.86,
         track: 'vocal',
+        confidence: 1,
+        inKey: true,
       });
     });
   });
 
   notes.sort((a, b) => a.startTime - b.startTime || a.midi - b.midi);
   const duration = Number((measures.length * beatsPerMeasure * beatSec + 1.2).toFixed(2));
-  const pianoNoteCount = notes.filter((n) => n.track === 'piano').length;
-  const vocalNoteCount = notes.filter((n) => n.track === 'vocal').length;
+  const countsByTrack: Record<TrackRole, number> = {
+    vocal: notes.filter((n) => n.track === 'vocal').length,
+    chords: notes.filter((n) => n.track === 'chords').length,
+    bass: notes.filter((n) => n.track === 'bass').length,
+    lead: notes.filter((n) => n.track === 'lead').length,
+  };
 
   return {
     id,
@@ -76,9 +103,10 @@ function compileScore(
     duration,
     bpm,
     keySignature,
+    keyRoot,
+    keyMode,
     notes,
-    pianoNoteCount,
-    vocalNoteCount,
+    countsByTrack,
   };
 }
 
@@ -86,15 +114,17 @@ export const DEMO_PIECES: TranscribedPiece[] = [
   compileScore(
     'nocturno-mi-menor',
     'Nocturno en Mi menor',
-    'Arreglo de concierto · Piano y línea vocal',
+    'Arreglo de concierto · 4 pistas separadas',
     86,
     'Mi menor',
     4,
+    'minor',
+    4,
     [
-      // Em9
       {
-        bass: [40, 47, 52, 55, 59, 55, 52, 47],
-        harmony: [55, 59, 64],
+        bass: [40, 47],
+        chords: [52, 55, 59, 55, 52, 55, 59, 64],
+        lead: [{ beat: 2.5, midi: 83, dur: 1.0 }],
         melody: [
           { beat: 0, midi: 71, dur: 1.5, vel: 0.84 },
           { beat: 1.5, midi: 74, dur: 0.5, vel: 0.8 },
@@ -102,20 +132,20 @@ export const DEMO_PIECES: TranscribedPiece[] = [
           { beat: 3.5, midi: 74, dur: 0.5, vel: 0.76 },
         ],
       },
-      // Cmaj7
       {
-        bass: [36, 43, 48, 52, 55, 52, 48, 43],
-        harmony: [52, 55, 59],
+        bass: [36, 43],
+        chords: [48, 52, 55, 59, 55, 52, 48, 52],
+        lead: [{ beat: 1.5, midi: 79, dur: 1.0 }],
         melody: [
           { beat: 0, midi: 72, dur: 2.0, vel: 0.86 },
           { beat: 2, midi: 71, dur: 1.0, vel: 0.82 },
           { beat: 3, midi: 67, dur: 1.0, vel: 0.78 },
         ],
       },
-      // Am9
       {
-        bass: [45, 52, 57, 60, 64, 60, 57, 52],
-        harmony: [57, 60, 64],
+        bass: [45, 52],
+        chords: [52, 57, 60, 64, 60, 57, 52, 57],
+        lead: [{ beat: 2.5, midi: 81, dur: 1.0 }],
         melody: [
           { beat: 0, midi: 69, dur: 1.5, vel: 0.84 },
           { beat: 1.5, midi: 71, dur: 0.5, vel: 0.82 },
@@ -123,20 +153,20 @@ export const DEMO_PIECES: TranscribedPiece[] = [
           { beat: 3, midi: 74, dur: 1.0, vel: 0.86 },
         ],
       },
-      // B7sus4 -> B7
       {
-        bass: [35, 42, 47, 51, 54, 51, 47, 42],
-        harmony: [54, 57, 63],
+        bass: [35, 42],
+        chords: [47, 51, 54, 59, 54, 51, 47, 51],
+        lead: [{ beat: 1.0, midi: 78, dur: 1.5 }],
         melody: [
           { beat: 0, midi: 71, dur: 2.5, vel: 0.85 },
           { beat: 2.5, midi: 69, dur: 0.5, vel: 0.78 },
           { beat: 3, midi: 66, dur: 1.0, vel: 0.76 },
         ],
       },
-      // Em
       {
-        bass: [40, 47, 52, 59, 64, 59, 55, 52],
-        harmony: [55, 59, 64],
+        bass: [40, 47],
+        chords: [52, 55, 59, 64, 59, 55, 52, 55],
+        lead: [{ beat: 2.5, midi: 83, dur: 1.0 }],
         melody: [
           { beat: 0, midi: 76, dur: 1.5, vel: 0.92 },
           { beat: 1.5, midi: 78, dur: 0.5, vel: 0.88 },
@@ -144,20 +174,20 @@ export const DEMO_PIECES: TranscribedPiece[] = [
           { beat: 3.5, midi: 76, dur: 0.5, vel: 0.82 },
         ],
       },
-      // D/F#
       {
-        bass: [42, 50, 54, 57, 62, 57, 54, 50],
-        harmony: [54, 57, 62],
+        bass: [42, 50],
+        chords: [50, 54, 57, 62, 57, 54, 50, 54],
+        lead: [{ beat: 1.5, midi: 81, dur: 1.0 }],
         melody: [
           { beat: 0, midi: 74, dur: 2.0, vel: 0.88 },
           { beat: 2, midi: 72, dur: 1.0, vel: 0.82 },
           { beat: 3, midi: 71, dur: 1.0, vel: 0.8 },
         ],
       },
-      // Cmaj7 -> B7
       {
-        bass: [36, 48, 52, 55, 35, 47, 51, 54],
-        harmony: [55, 59, 63],
+        bass: [36, 35],
+        chords: [48, 52, 55, 52, 47, 51, 54, 51],
+        lead: [{ beat: 2.0, midi: 78, dur: 1.5 }],
         melody: [
           { beat: 0, midi: 69, dur: 1.5, vel: 0.84 },
           { beat: 1.5, midi: 67, dur: 0.5, vel: 0.8 },
@@ -165,27 +195,28 @@ export const DEMO_PIECES: TranscribedPiece[] = [
           { beat: 3.5, midi: 69, dur: 0.5, vel: 0.78 },
         ],
       },
-      // Em final resolution
       {
-        bass: [40, 47, 52, 55, 59, 64],
-        harmony: [52, 55, 59, 64],
-        melody: [
-          { beat: 0, midi: 64, dur: 3.5, vel: 0.85 },
-        ],
+        bass: [40],
+        chords: [52, 55, 59, 64],
+        lead: [{ beat: 1.5, midi: 79, dur: 2.0 }],
+        melody: [{ beat: 0, midi: 64, dur: 3.5, vel: 0.85 }],
       },
     ],
   ),
   compileScore(
     'vals-salon-do-mayor',
     'Vals de Salón en Do mayor',
-    'Pieza lírica · Acompañamiento y voz cantabile',
+    'Pieza lírica · Voz, acordes, bajo y arreglos',
     112,
     'Do mayor',
+    0,
+    'major',
     3,
     [
       {
-        bass: [36, 48, 52, 55, 48, 52],
-        harmony: [52, 55, 60],
+        bass: [36],
+        chords: [48, 52, 55, 52, 55, 60],
+        lead: [{ beat: 1.0, midi: 79, dur: 1.0 }],
         melody: [
           { beat: 0, midi: 72, dur: 1.5, vel: 0.86 },
           { beat: 1.5, midi: 74, dur: 0.5, vel: 0.8 },
@@ -193,16 +224,18 @@ export const DEMO_PIECES: TranscribedPiece[] = [
         ],
       },
       {
-        bass: [43, 50, 55, 59, 50, 55],
-        harmony: [55, 59, 62],
+        bass: [43],
+        chords: [50, 55, 59, 55, 59, 62],
+        lead: [{ beat: 1.5, midi: 83, dur: 1.0 }],
         melody: [
           { beat: 0, midi: 79, dur: 2.0, vel: 0.92 },
           { beat: 2, midi: 76, dur: 1.0, vel: 0.82 },
         ],
       },
       {
-        bass: [45, 52, 57, 60, 52, 57],
-        harmony: [57, 60, 64],
+        bass: [45],
+        chords: [52, 57, 60, 57, 60, 64],
+        lead: [{ beat: 2.0, midi: 81, dur: 0.8 }],
         melody: [
           { beat: 0, midi: 77, dur: 1.0, vel: 0.86 },
           { beat: 1, midi: 76, dur: 1.0, vel: 0.84 },
@@ -210,15 +243,15 @@ export const DEMO_PIECES: TranscribedPiece[] = [
         ],
       },
       {
-        bass: [41, 48, 53, 57, 48, 53],
-        harmony: [53, 57, 60],
-        melody: [
-          { beat: 0, midi: 72, dur: 2.5, vel: 0.84 },
-        ],
+        bass: [41],
+        chords: [48, 53, 57, 53, 57, 60],
+        lead: [{ beat: 1.0, midi: 77, dur: 1.5 }],
+        melody: [{ beat: 0, midi: 72, dur: 2.5, vel: 0.84 }],
       },
       {
-        bass: [38, 45, 50, 53, 45, 50],
-        harmony: [53, 57, 62],
+        bass: [38],
+        chords: [45, 50, 53, 50, 53, 57],
+        lead: [{ beat: 2.0, midi: 81, dur: 0.9 }],
         melody: [
           { beat: 0, midi: 74, dur: 1.5, vel: 0.86 },
           { beat: 1.5, midi: 76, dur: 0.5, vel: 0.82 },
@@ -226,8 +259,9 @@ export const DEMO_PIECES: TranscribedPiece[] = [
         ],
       },
       {
-        bass: [43, 50, 55, 59, 53, 55],
-        harmony: [55, 59, 62],
+        bass: [43],
+        chords: [50, 55, 59, 53, 55, 59],
+        lead: [{ beat: 1.0, midi: 79, dur: 1.0 }],
         melody: [
           { beat: 0, midi: 76, dur: 1.5, vel: 0.86 },
           { beat: 1.5, midi: 74, dur: 0.5, vel: 0.8 },
@@ -235,25 +269,27 @@ export const DEMO_PIECES: TranscribedPiece[] = [
         ],
       },
       {
-        bass: [36, 48, 52, 55, 60],
-        harmony: [52, 55, 60],
-        melody: [
-          { beat: 0, midi: 72, dur: 2.8, vel: 0.88 },
-        ],
+        bass: [36],
+        chords: [48, 52, 55, 60],
+        lead: [{ beat: 1.0, midi: 84, dur: 1.8 }],
+        melody: [{ beat: 0, midi: 72, dur: 2.8, vel: 0.88 }],
       },
     ],
   ),
   compileScore(
     'balada-la-menor',
     'Balada Vocal en La menor',
-    'Cadencia cinematográfica · Acordes graves y soprano',
+    'Cadencia cinematográfica · 4 pistas separadas',
     76,
     'La menor',
+    9,
+    'minor',
     4,
     [
       {
-        bass: [33, 45, 52, 57, 60, 57, 52, 45],
-        harmony: [57, 60, 64],
+        bass: [33, 45],
+        chords: [52, 57, 60, 57, 52, 57, 60, 64],
+        lead: [{ beat: 2.5, midi: 81, dur: 1.2 }],
         melody: [
           { beat: 0, midi: 69, dur: 1.0, vel: 0.85 },
           { beat: 1, midi: 72, dur: 1.0, vel: 0.88 },
@@ -262,16 +298,18 @@ export const DEMO_PIECES: TranscribedPiece[] = [
         ],
       },
       {
-        bass: [41, 48, 53, 57, 60, 57, 53, 48],
-        harmony: [53, 57, 60],
+        bass: [41, 48],
+        chords: [53, 57, 60, 57, 53, 57, 60, 57],
+        lead: [{ beat: 1.5, midi: 77, dur: 1.5 }],
         melody: [
           { beat: 0, midi: 72, dur: 2.0, vel: 0.86 },
           { beat: 2, midi: 69, dur: 2.0, vel: 0.82 },
         ],
       },
       {
-        bass: [36, 43, 48, 55, 60, 55, 52, 48],
-        harmony: [52, 55, 60],
+        bass: [36, 43],
+        chords: [48, 55, 60, 55, 52, 55, 60, 55],
+        lead: [{ beat: 2.5, midi: 84, dur: 1.2 }],
         melody: [
           { beat: 0, midi: 74, dur: 1.5, vel: 0.88 },
           { beat: 1.5, midi: 76, dur: 0.5, vel: 0.84 },
@@ -279,8 +317,9 @@ export const DEMO_PIECES: TranscribedPiece[] = [
         ],
       },
       {
-        bass: [40, 47, 52, 56, 59, 56, 52, 47],
-        harmony: [56, 59, 64],
+        bass: [40, 47],
+        chords: [52, 56, 59, 56, 52, 56, 59, 64],
+        lead: [{ beat: 1.5, midi: 80, dur: 1.2 }],
         melody: [
           { beat: 0, midi: 76, dur: 2.0, vel: 0.88 },
           { beat: 2, midi: 74, dur: 1.0, vel: 0.82 },
@@ -288,11 +327,10 @@ export const DEMO_PIECES: TranscribedPiece[] = [
         ],
       },
       {
-        bass: [33, 45, 52, 57, 60, 64],
-        harmony: [57, 60, 64],
-        melody: [
-          { beat: 0, midi: 69, dur: 3.5, vel: 0.88 },
-        ],
+        bass: [33],
+        chords: [45, 52, 57, 60, 64],
+        lead: [{ beat: 1.5, midi: 81, dur: 2.0 }],
+        melody: [{ beat: 0, midi: 69, dur: 3.5, vel: 0.88 }],
       },
     ],
   ),

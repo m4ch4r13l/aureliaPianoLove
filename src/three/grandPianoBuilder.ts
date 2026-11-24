@@ -792,13 +792,36 @@ export function buildGrandPiano(
   const ribbons: RibbonParticle[] = [];
   const maxRibbons = 56;
 
-  // Color palette for active keys & 3D ribbons (warm concert gold for piano, luminous rose-coral for vocal melody)
-  const pianoGlowColor = new THREE.Color(0xf2b84b);
-  const vocalGlowColor = new THREE.Color(0xf26b7a);
-  const pianoTintWhite = new THREE.Color(0xffe19c);
-  const vocalTintWhite = new THREE.Color(0xffb5be);
-  const pianoTintBlack = new THREE.Color(0x8c6320);
-  const vocalTintBlack = new THREE.Color(0x9c3242);
+  // Refined concert color palette distinguishing the 4 separated instrument tracks
+  const rolePalette: Record<
+    TrackRole,
+    { glow: THREE.Color; whiteTint: THREE.Color; blackTint: THREE.Color; emissiveStrength: number }
+  > = {
+    vocal: {
+      glow: new THREE.Color(0xf26b7a),
+      whiteTint: new THREE.Color(0xffb8c0),
+      blackTint: new THREE.Color(0xa63646),
+      emissiveStrength: 0.95,
+    },
+    chords: {
+      glow: new THREE.Color(0xf2b84b),
+      whiteTint: new THREE.Color(0xffe19c),
+      blackTint: new THREE.Color(0x946922),
+      emissiveStrength: 0.72,
+    },
+    bass: {
+      glow: new THREE.Color(0xd9823b),
+      whiteTint: new THREE.Color(0xf7c59b),
+      blackTint: new THREE.Color(0x8a4d1e),
+      emissiveStrength: 0.75,
+    },
+    lead: {
+      glow: new THREE.Color(0x7db4e6),
+      whiteTint: new THREE.Color(0xc5e1fa),
+      blackTint: new THREE.Color(0x365f85),
+      emissiveStrength: 0.85,
+    },
+  };
   const blackColorZero = new THREE.Color(0x000000);
 
   const spawnRibbon = (handle: AnimatedKeyHandle, role: TrackRole) => {
@@ -807,19 +830,19 @@ export function buildGrandPiano(
       ribbonGroup.remove(oldest.mesh);
       oldest.material.dispose();
     }
-    const col = role === 'vocal' ? vocalGlowColor : pianoGlowColor;
+    const col = rolePalette[role].glow;
     const mat = new THREE.MeshStandardMaterial({
       color: col,
       emissive: col,
-      emissiveIntensity: 1.35,
+      emissiveIntensity: 1.3,
       roughness: 0.25,
       metalness: 0.1,
       transparent: true,
-      opacity: 0.85,
+      opacity: 0.84,
       depthWrite: false,
     });
     const mesh = new THREE.Mesh(ribbonGeo, mat);
-    const scaleY = role === 'vocal' ? 1.45 : 0.95;
+    const scaleY = role === 'vocal' ? 1.45 : role === 'bass' ? 1.15 : 0.95;
     mesh.scale.set(handle.isBlack ? 0.72 : 1.0, scaleY, 0.75);
     mesh.position.set(handle.keyX, handle.keyTopY + 0.055, handle.keyFrontZ - 0.04);
     ribbonGroup.add(mesh);
@@ -886,7 +909,6 @@ export function buildGrandPiano(
       propStick.visible = false;
     } else {
       propStick.visible = true;
-      // Compute underside contact point on the lid above the right rim
       const lidRadius = 1.36;
       const contactX = -0.755 + Math.cos(currentLidAngle) * lidRadius;
       const contactY = rimTopY + 0.012 + Math.sin(currentLidAngle) * lidRadius;
@@ -915,24 +937,14 @@ export function buildGrandPiano(
 
       if (h.press > 0.002 || prevPress > 0.002) {
         needsMoreFrames = true;
-        // Key rotates downward around rear pivot (+X rotation tips +Z front downward)
         h.pivot.rotation.x = h.press * 0.072;
 
-        // Subtle emissive & color glow distinguishing piano vs vocal melody
-        const role = h.activeRole;
-        const glowCol = role === 'vocal' ? vocalGlowColor : pianoGlowColor;
-        const tintCol =
-          role === 'vocal'
-            ? h.isBlack
-              ? vocalTintBlack
-              : vocalTintWhite
-            : h.isBlack
-              ? pianoTintBlack
-              : pianoTintWhite;
+        const pal = rolePalette[h.activeRole ?? 'chords'];
+        const tintCol = h.isBlack ? pal.blackTint : pal.whiteTint;
 
         h.material.color.copy(h.baseColor).lerp(tintCol, h.press * 0.85);
-        h.material.emissive.copy(glowCol);
-        h.material.emissiveIntensity = h.press * (role === 'vocal' ? 0.95 : 0.68);
+        h.material.emissive.copy(pal.glow);
+        h.material.emissiveIntensity = h.press * pal.emissiveStrength;
       } else if (h.material.emissiveIntensity !== 0) {
         h.pivot.rotation.x = 0;
         h.material.color.copy(h.baseColor);

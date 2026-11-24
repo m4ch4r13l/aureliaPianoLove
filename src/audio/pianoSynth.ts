@@ -2,13 +2,17 @@ import { MAX_MIDI, MIN_MIDI, midiToFreq } from './pianoTheory';
 import { TrackRole } from './pitchDsp';
 
 interface ActiveAudioVoice {
+  startedAt: number;
   stopAt: (when: number) => void;
 }
 
+const MAX_POLYPHONY = 14;
+
 /**
  * Procedural Concert Grand Piano Synthesizer using Web Audio API.
- * Uses stretched harmonic partials, felt-hammer transient, velocity-sensitive lowpass,
- * stereo key-position panning, and a procedural concert-hall convolution reverb.
+ * Features stretched partials, felt-hammer attack, per-role musical voicing
+ * (vocal cantabile, warm chords, clean bass, crystalline lead), voice-stealing
+ * anti-clipping protection, and procedural concert-hall reverb.
  */
 export class GrandPianoSynth {
   private ctx: AudioContext | null = null;
@@ -23,7 +27,7 @@ export class GrandPianoSynth {
   private originalGain: GainNode | null = null;
 
   private masterVolume = 0.85;
-  private originalAudioMix = 0.0; // 0 = pure grand piano, >0 = blend with original MP3
+  private originalAudioMix = 0.0;
 
   public ensureContext(): AudioContext | null {
     if (typeof window === 'undefined') return null;
@@ -42,39 +46,43 @@ export class GrandPianoSynth {
   }
 
   private setupGraph(ctx: AudioContext): void {
+    // Sub-rumble clean high-pass to prevent low-end distortion
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 34;
+
     this.compressor = ctx.createDynamicsCompressor();
-    this.compressor.threshold.value = -14;
-    this.compressor.knee.value = 18;
-    this.compressor.ratio.value = 4;
-    this.compressor.attack.value = 0.004;
-    this.compressor.release.value = 0.22;
+    this.compressor.threshold.value = -16;
+    this.compressor.knee.value = 20;
+    this.compressor.ratio.value = 5;
+    this.compressor.attack.value = 0.003;
+    this.compressor.release.value = 0.2;
 
     this.masterGain = ctx.createGain();
     this.masterGain.gain.value = this.masterVolume;
 
     this.dryBus = ctx.createGain();
-    this.dryBus.gain.value = 0.82;
+    this.dryBus.gain.value = 0.84;
 
     this.wetBus = ctx.createGain();
-    this.wetBus.gain.value = 0.34;
+    this.wetBus.gain.value = 0.28;
 
-    // Procedural warm concert-hall impulse response
     const convolver = ctx.createConvolver();
-    convolver.buffer = this.createHallImpulse(ctx, 2.2, 2.6);
+    convolver.buffer = this.createHallImpulse(ctx, 2.0, 2.8);
 
-    this.dryBus.connect(this.compressor);
+    this.dryBus.connect(hp);
     this.wetBus.connect(convolver);
-    convolver.connect(this.compressor);
+    convolver.connect(hp);
 
+    hp.connect(this.compressor);
     this.compressor.connect(this.masterGain);
     this.masterGain.connect(ctx.destination);
 
-    // Pre-generate short filtered hammer felt noise buffer
-    const noiseLen = Math.floor(ctx.sampleRate * 0.045);
+    const noiseLen = Math.floor(ctx.sampleRate * 0.035);
     this.noiseBuffer = ctx.createBuffer(1, noiseLen, ctx.sampleRate);
     const data = this.noiseBuffer.getChannelData(0);
     for (let i = 0; i < noiseLen; i++) {
-      const env = Math.exp(-i / (ctx.sampleRate * 0.008));
+      const env = Math.exp(-i / (ctx.sampleRate * 0.006));
       data[i] = (Math.random() * 2 - 1) * env;
     }
   }
@@ -89,8 +97,7 @@ export class GrandPianoSynth {
         const t = i / length;
         const env = Math.pow(1 - t, decay);
         const white = (Math.random() * 2 - 1) * env;
-        // Smooth high-frequency absorption typical of wood concert halls
-        lp = lp * 0.72 + white * 0.28;
+        lp = lp * 0.76 + white * 0.24;
         channel[i] = lp * (i < 400 ? i / 400 : 1);
       }
     }
@@ -153,77 +160,108 @@ export class GrandPianoSynth {
     }
   }
 
+  private enforcePolyphonyLimit(now: number): void {
+    while (this.activeVoices.size >= MAX_POLYPHONY) {
+      let oldestKey: string | null = null;
+      let oldestTime = Infinity;
+      for (const [k, v] of this.activeVoices.entries()) {
+        if (v.startedAt < oldestTime) {
+          oldestTime = v.startedAt;
+          oldestKey = k;
+        }
+      }
+      if (!oldestKey) break;
+      const victim = this.activeVoices.get(oldestKey);
+      this.activeVoices.delete(oldestKey);
+      victim?.stopAt(now);
+    }
+  }
+
   public playNote(
     midi: number,
     velocity = 0.75,
     durationSec = 1.2,
-    role: TrackRole = 'piano',
+    role: TrackRole = 'chords',
   ): void {
     const ctx = this.ensureContext();
     if (!ctx || !this.dryBus || !this.wetBus) return;
 
+    const now = ctx.currentTime;
+    this.enforcePolyphonyLimit(now);
+
     const clampedMidi = Math.max(MIN_MIDI, Math.min(MAX_MIDI, Math.round(midi)));
     const freq = midiToFreq(clampedMidi);
-    const now = ctx.currentTime;
     const vel = Math.max(0.12, Math.min(1.0, velocity));
 
-    // Voice envelope and harmonic richness vary naturally across the 88-key range
-    const pitchNorm = (clampedMidi - MIN_MIDI) / (MAX_MIDI - MIN_MIDI); // 0 bass -> 1 treble
-    const naturalDecay = (4.2 - pitchNorm * 3.1) * (role === 'vocal' ? 1.15 : 1.0);
-    const holdDur = Math.max(0.09, Math.min(durationSec, 4.5));
-    const releaseTime = 0.28 + (1 - pitchNorm) * 0.35;
+    const pitchNorm = (clampedMidi - MIN_MIDI) / (MAX_MIDI - MIN_MIDI);
+    const naturalDecay = (3.8 - pitchNorm * 2.8) * (role === 'vocal' ? 1.15 : role === 'bass' ? 1.2 : 0.95);
+    const holdDur = Math.max(0.09, Math.min(durationSec, 3.8));
+    const releaseTime = 0.24 + (1 - pitchNorm) * 0.28;
     const stopTime = now + holdDur + releaseTime;
 
-    // Velocity-sensitive lowpass brightness filter
+    // Role-tailored concert grand voicing (clear separation between singing voice, bass & chords)
+    const roleBright =
+      role === 'vocal' ? 5.6 : role === 'lead' ? 5.0 : role === 'bass' ? 2.6 : 3.8;
+    const roleGainScale =
+      role === 'vocal' ? 0.22 : role === 'bass' ? 0.17 : role === 'lead' ? 0.12 : 0.13;
+
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
-    const peakCutoff = Math.min(
-      11500,
-      freq * (role === 'vocal' ? 6.2 : 4.6) * (0.45 + vel * 0.85),
-    );
-    const sustainCutoff = Math.min(4800, freq * (role === 'vocal' ? 2.8 : 2.1));
+    const peakCutoff = Math.min(9800, freq * roleBright * (0.48 + vel * 0.78));
+    const sustainCutoff = Math.min(4200, freq * (role === 'vocal' ? 2.6 : 1.85));
     filter.frequency.setValueAtTime(peakCutoff, now);
     filter.frequency.exponentialRampToValueAtTime(
-      Math.max(180, sustainCutoff),
-      now + Math.min(holdDur, 0.9),
+      Math.max(150, sustainCutoff),
+      now + Math.min(holdDur, 0.85),
     );
-    filter.Q.value = role === 'vocal' ? 1.15 : 0.7;
+    filter.Q.value = role === 'vocal' ? 1.05 : 0.6;
 
-    // Stereo position mirroring physical grand piano keyboard (bass left -> treble right)
     const panner = ctx.createStereoPanner();
-    panner.pan.value = (pitchNorm - 0.5) * 0.72;
+    panner.pan.value =
+      role === 'vocal'
+        ? 0
+        : role === 'bass'
+          ? -0.22
+          : (pitchNorm - 0.5) * 0.68;
+
+    // Gentle automatic gain headroom when many voices sound together
+    const polyScale = 1 / Math.sqrt(Math.max(1, this.activeVoices.size * 0.45 + 1));
 
     const voiceGain = ctx.createGain();
-    const peakGain = vel * (role === 'vocal' ? 0.24 : 0.17) * (1.12 - pitchNorm * 0.28);
+    const peakGain = vel * roleGainScale * polyScale * (1.08 - pitchNorm * 0.24);
     voiceGain.gain.setValueAtTime(0.0001, now);
-    voiceGain.gain.linearRampToValueAtTime(peakGain, now + 0.006);
+    voiceGain.gain.linearRampToValueAtTime(peakGain, now + 0.007);
     voiceGain.gain.exponentialRampToValueAtTime(
-      Math.max(0.0005, peakGain * 0.42),
-      now + Math.min(holdDur, naturalDecay * 0.5),
+      Math.max(0.0005, peakGain * 0.4),
+      now + Math.min(holdDur, naturalDecay * 0.48),
     );
-    voiceGain.gain.setTargetAtTime(0.0001, now + holdDur, releaseTime * 0.32);
+    voiceGain.gain.setTargetAtTime(0.0001, now + holdDur, releaseTime * 0.3);
 
     filter.connect(voiceGain);
     voiceGain.connect(panner);
     panner.connect(this.dryBus);
     panner.connect(this.wetBus);
 
-    // Stretched piano string partials (slight inharmonicity coefficient B)
-    const B = 0.00014 + pitchNorm * 0.00035;
+    const B = 0.00013 + pitchNorm * 0.00032;
     const partials: Array<{ n: number; amp: number; type: OscillatorType }> =
       role === 'vocal'
         ? [
             { n: 1, amp: 1.0, type: 'triangle' },
-            { n: 2, amp: 0.48, type: 'sine' },
-            { n: 3, amp: 0.22, type: 'sine' },
-            { n: 4, amp: 0.09, type: 'sine' },
-          ]
-        : [
-            { n: 1, amp: 1.0, type: 'triangle' },
-            { n: 2, amp: 0.36, type: 'sine' },
-            { n: 3, amp: 0.16, type: 'sine' },
+            { n: 2, amp: 0.44, type: 'sine' },
+            { n: 3, amp: 0.18, type: 'sine' },
             { n: 4, amp: 0.07, type: 'sine' },
-          ];
+          ]
+        : role === 'bass'
+          ? [
+              { n: 1, amp: 1.0, type: 'sine' },
+              { n: 2, amp: 0.42, type: 'triangle' },
+              { n: 3, amp: 0.14, type: 'sine' },
+            ]
+          : [
+              { n: 1, amp: 1.0, type: 'triangle' },
+              { n: 2, amp: 0.32, type: 'sine' },
+              { n: 3, amp: 0.13, type: 'sine' },
+            ];
 
     const oscs: OscillatorNode[] = [];
     for (const p of partials) {
@@ -233,8 +271,7 @@ export class GrandPianoSynth {
       const osc = ctx.createOscillator();
       osc.type = p.type;
       osc.frequency.setValueAtTime(partialFreq, now);
-      // Tiny chorus detune on 2nd partial for warm unison grand piano strings
-      if (p.n === 2) osc.detune.value = 1.6;
+      if (p.n === 2) osc.detune.value = 1.4;
 
       const pGain = ctx.createGain();
       pGain.gain.value = p.amp;
@@ -245,16 +282,15 @@ export class GrandPianoSynth {
       oscs.push(osc);
     }
 
-    // Subtle felt-hammer percussive thump
-    if (this.noiseBuffer) {
+    if (this.noiseBuffer && role !== 'bass') {
       const noise = ctx.createBufferSource();
       noise.buffer = this.noiseBuffer;
       const nFilter = ctx.createBiquadFilter();
       nFilter.type = 'bandpass';
-      nFilter.frequency.value = Math.min(3400, 650 + pitchNorm * 2200);
-      nFilter.Q.value = 1.4;
+      nFilter.frequency.value = Math.min(3000, 620 + pitchNorm * 1900);
+      nFilter.Q.value = 1.6;
       const nGain = ctx.createGain();
-      nGain.gain.value = vel * 0.09;
+      nGain.gain.value = vel * 0.055 * polyScale;
       noise.connect(nFilter);
       nFilter.connect(nGain);
       nGain.connect(panner);
@@ -267,16 +303,17 @@ export class GrandPianoSynth {
     }, Math.ceil((stopTime - now + 0.15) * 1000));
 
     this.activeVoices.set(voiceId, {
+      startedAt: now,
       stopAt: (when: number) => {
         window.clearTimeout(cleanupTimer);
         try {
           voiceGain.gain.cancelScheduledValues(when);
-          voiceGain.gain.setTargetAtTime(0.0001, when, 0.04);
+          voiceGain.gain.setTargetAtTime(0.0001, when, 0.035);
           for (const o of oscs) {
-            o.stop(when + 0.15);
+            o.stop(when + 0.14);
           }
         } catch {
-          // ignore already stopped
+          // already stopped
         }
       },
     });

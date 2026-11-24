@@ -1,24 +1,48 @@
-import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, Upload } from 'lucide-react';
 import { DEMO_PIECES } from './audio/demoPieces';
 import { decodeAndTranscribeAudioFile } from './audio/audioTranscriber';
 import { GrandPianoSynth } from './audio/pianoSynth';
 import { KEYBOARD_KEY_TO_MIDI } from './audio/pianoTheory';
-import { PianoNoteEvent, TrackRole, TranscribedPiece } from './audio/pitchDsp';
+import {
+  CleanlinessLevel,
+  filterAndCleanNotes,
+  PianoNoteEvent,
+  TrackRole,
+  TranscribedPiece,
+} from './audio/pitchDsp';
+import { buildMultiTrackMidi } from './audio/midiExporter';
 import {
   CameraPresetId,
   GrandPianoViewport,
   PianoViewportHandle,
 } from './components/GrandPianoViewport';
-import { ControlDock, TrackFilterMode } from './components/ControlDock';
+import { ControlDock } from './components/ControlDock';
 import { LidState } from './three/grandPianoBuilder';
+
+const EMPTY_ACTIVE_BY_ROLE: Record<TrackRole, number[]> = {
+  vocal: [],
+  chords: [],
+  bass: [],
+  lead: [],
+};
 
 export default function App() {
   const [pieces, setPieces] = useState<TranscribedPiece[]>(DEMO_PIECES);
   const [currentPieceId, setCurrentPieceId] = useState<string>(DEMO_PIECES[0].id);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
-  const [trackFilter, setTrackFilter] = useState<TrackFilterMode>('both');
+
+  // 4 separated instrument tracks — independently toggleable at any moment
+  const [enabledTracks, setEnabledTracks] = useState<Record<TrackRole, boolean>>({
+    vocal: true,
+    chords: true,
+    bass: true,
+    lead: true,
+  });
+  // Cleanliness filter defaults to 'strict' (Alta) so uploaded MP3s play with minimal noise
+  const [cleanliness, setCleanliness] = useState<CleanlinessLevel>('strict');
+
   const [playbackRate, setPlaybackRate] = useState(1);
   const [cameraPreset, setCameraPreset] = useState<CameraPresetId>('concert');
   const [lidState, setLidState] = useState<LidState>('open');
@@ -35,35 +59,46 @@ export default function App() {
     error: string | null;
   }>({ active: false, progress: 0, stage: '', error: null });
 
-  const [activeVocalMidis, setActiveVocalMidis] = useState<number[]>([]);
-  const [activePianoMidis, setActivePianoMidis] = useState<number[]>([]);
+  const [activeNotesByRole, setActiveNotesByRole] =
+    useState<Record<TrackRole, number[]>>(EMPTY_ACTIVE_BY_ROLE);
 
   const currentPiece = pieces.find((p) => p.id === currentPieceId) ?? pieces[0];
+
+  // Live cleaned & separated note list (updates instantaneously when toggling tracks or cleanliness)
+  const filteredNotes = useMemo(
+    () => filterAndCleanNotes(currentPiece, enabledTracks, cleanliness),
+    [currentPiece, enabledTracks, cleanliness],
+  );
 
   const viewportRef = useRef<PianoViewportHandle | null>(null);
   const synthRef = useRef<GrandPianoSynth | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const uploadedBuffersRef = useRef<Map<string, AudioBuffer>>(new Map());
 
-  // Playback engine mutable refs (avoids 60Hz React re-renders)
-  const playStateRef = useRef({
+  const playStateRef = useRef<{
+    playing: boolean;
+    songTime: number;
+    lastFrameMs: number;
+    triggeredIds: Set<string>;
+    activeNotes: Map<number, { endTime: number; role: TrackRole }>;
+    piece: TranscribedPiece;
+    notes: PianoNoteEvent[];
+    playbackRate: number;
+  }>({
     playing: false,
     songTime: 0,
     lastFrameMs: 0,
     triggeredIds: new Set<string>(),
-    activeNotes: new Map<number, { endTime: number; role: TrackRole }>(),
+    activeNotes: new Map(),
     piece: currentPiece,
-    trackFilter,
+    notes: filteredNotes,
     playbackRate,
-    mixOriginalAudio,
   });
 
   playStateRef.current.piece = currentPiece;
-  playStateRef.current.trackFilter = trackFilter;
+  playStateRef.current.notes = filteredNotes;
   playStateRef.current.playbackRate = playbackRate;
-  playStateRef.current.mixOriginalAudio = mixOriginalAudio;
 
-  // Initialize procedural grand piano synthesizer once
   useEffect(() => {
     const synth = new GrandPianoSynth();
     synthRef.current = synth;
@@ -94,8 +129,7 @@ export default function App() {
     viewportRef.current?.clearAllKeys();
     viewportRef.current?.setSustainActive(false);
     setIsPlaying(false);
-    setActiveVocalMidis([]);
-    setActivePianoMidis([]);
+    setActiveNotesByRole(EMPTY_ACTIVE_BY_ROLE);
   }, []);
 
   const syncOriginalAudioPlayback = useCallback((pieceId: string, timeSec: number, rate: number) => {
@@ -123,8 +157,7 @@ export default function App() {
       ps.triggeredIds.clear();
       ps.activeNotes.clear();
 
-      // Mark earlier notes as already triggered when resuming mid-song
-      for (const note of piece.notes) {
+      for (const note of ps.notes) {
         if (note.startTime < startAt - 0.04) {
           ps.triggeredIds.add(note.id);
         }
@@ -172,13 +205,28 @@ export default function App() {
     (pieceId: string) => {
       stopPlayback(true);
       setCurrentPieceId(pieceId);
-      const hasBuf = uploadedBuffersRef.current.has(pieceId);
-      if (!hasBuf) setMixOriginalAudio(false);
+      if (!uploadedBuffersRef.current.has(pieceId)) {
+        setMixOriginalAudio(false);
+      }
     },
     [stopPlayback],
   );
 
-  // Sync playback rate into original audio buffer if playing
+  const handleToggleTrack = useCallback((role: TrackRole) => {
+    setEnabledTracks((prev) => ({ ...prev, [role]: !prev[role] }));
+  }, []);
+
+  // When cleanliness or tracks change mid-playback, mark already-past notes as triggered so we don't burst old notes
+  useEffect(() => {
+    const ps = playStateRef.current;
+    if (!ps.playing) return;
+    for (const note of filteredNotes) {
+      if (note.startTime < ps.songTime - 0.05) {
+        ps.triggeredIds.add(note.id);
+      }
+    }
+  }, [filteredNotes]);
+
   useEffect(() => {
     if (playStateRef.current.playing) {
       syncOriginalAudioPlayback(
@@ -189,17 +237,12 @@ export default function App() {
     }
   }, [playbackRate, syncOriginalAudioPlayback]);
 
-  // High-precision playback scheduler driving Web Audio + 3D keys (throttled React HUD updates <= 10Hz)
+  // High-precision playback scheduler (throttled React HUD sync at 10Hz)
   useEffect(() => {
     if (!isPlaying) return;
 
     let rafId = 0;
     let lastHudSync = 0;
-
-    const noteMatchesFilter = (note: PianoNoteEvent, filter: TrackFilterMode): boolean => {
-      if (filter === 'both') return true;
-      return note.track === filter;
-    };
 
     const tick = (nowMs: number) => {
       const ps = playStateRef.current;
@@ -210,14 +253,12 @@ export default function App() {
       ps.songTime += dtSec * ps.playbackRate;
 
       const piece = ps.piece;
+      const notes = ps.notes;
 
-      // Trigger notes crossing current playback head
-      for (const note of piece.notes) {
+      for (const note of notes) {
         if (note.startTime > ps.songTime + 0.02) break;
         if (ps.triggeredIds.has(note.id)) continue;
         ps.triggeredIds.add(note.id);
-
-        if (!noteMatchesFilter(note, ps.trackFilter)) continue;
 
         const scaledDur = note.duration / ps.playbackRate;
         synthRef.current?.playNote(note.midi, note.velocity, scaledDur, note.track);
@@ -228,32 +269,34 @@ export default function App() {
         });
       }
 
-      // Release finished notes
-      let anyPianoActive = false;
+      let anyHarmonicActive = false;
       for (const [midi, info] of ps.activeNotes.entries()) {
         if (ps.songTime >= info.endTime) {
           ps.activeNotes.delete(midi);
           viewportRef.current?.setKeyActive(midi, false, null, 0);
-        } else if (info.role === 'piano') {
-          anyPianoActive = true;
+        } else if (info.role === 'chords' || info.role === 'bass') {
+          anyHarmonicActive = true;
         }
       }
-      viewportRef.current?.setSustainActive(anyPianoActive);
+      viewportRef.current?.setSustainActive(anyHarmonicActive);
 
-      // Throttled HUD update (~10Hz)
       if (nowMs - lastHudSync >= 100) {
         lastHudSync = nowMs;
         setCurrentTime(Math.min(ps.songTime, piece.duration));
-        const vocals: number[] = [];
-        const pianos: number[] = [];
+        const grouped: Record<TrackRole, number[]> = {
+          vocal: [],
+          chords: [],
+          bass: [],
+          lead: [],
+        };
         for (const [midi, info] of ps.activeNotes.entries()) {
-          if (info.role === 'vocal') vocals.push(midi);
-          else pianos.push(midi);
+          grouped[info.role].push(midi);
         }
-        vocals.sort((a, b) => a - b);
-        pianos.sort((a, b) => a - b);
-        setActiveVocalMidis(vocals);
-        setActivePianoMidis(pianos);
+        grouped.vocal.sort((a, b) => a - b);
+        grouped.chords.sort((a, b) => a - b);
+        grouped.bass.sort((a, b) => a - b);
+        grouped.lead.sort((a, b) => a - b);
+        setActiveNotesByRole(grouped);
       }
 
       if (ps.songTime >= piece.duration) {
@@ -273,21 +316,44 @@ export default function App() {
     };
   }, [isPlaying, stopPlayback]);
 
-  // Direct interactive playing (clicking 3D keys or computer keyboard)
+  // Direct interactive playing
   const handleManualNotePlay = useCallback((midi: number) => {
     synthRef.current?.ensureContext();
     synthRef.current?.playNote(midi, 0.85, 1.4, 'vocal');
     viewportRef.current?.setKeyActive(midi, true, 'vocal', 0.88);
-    setActiveVocalMidis((prev) => (prev.includes(midi) ? prev : [...prev.slice(-2), midi]));
+    setActiveNotesByRole((prev) => ({
+      ...prev,
+      vocal: prev.vocal.includes(midi) ? prev.vocal : [...prev.vocal.slice(-2), midi],
+    }));
     window.setTimeout(() => {
       if (!playStateRef.current.activeNotes.has(midi)) {
         viewportRef.current?.setKeyActive(midi, false, null, 0);
-        setActiveVocalMidis((prev) => prev.filter((m) => m !== midi));
+        setActiveNotesByRole((prev) => ({
+          ...prev,
+          vocal: prev.vocal.filter((m) => m !== midi),
+        }));
       }
     }, 340);
   }, []);
 
-  // Global keyboard shortcuts: Space = Play/Pause, H = Hide/Show dock, Z-M / Q-P = Live piano keys
+  // Export cleaned multi-track MIDI (.mid) separated into 4 instrument tracks
+  const handleExportMidi = useCallback(() => {
+    const bytes = buildMultiTrackMidi(currentPiece, filteredNotes);
+    const blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'audio/midi' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const safeName = currentPiece.title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/gi, '-')
+      .replace(/^-|-$/g, '');
+    a.href = url;
+    a.download = `${safeName || 'aurelia-piano'}-multipista.mid`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, [currentPiece, filteredNotes]);
+
   useEffect(() => {
     const heldCodes = new Set<string>();
 
@@ -329,7 +395,6 @@ export default function App() {
     };
   }, [handleManualNotePlay, handleTogglePlay]);
 
-  // MP3 / Audio File Upload & Real Transcription Flow
   const processAudioFile = useCallback(
     async (file: File) => {
       stopPlayback(true);
@@ -346,12 +411,22 @@ export default function App() {
         });
 
         uploadedBuffersRef.current.set(result.piece.id, result.audioBuffer);
+        const defaultTracks: Record<TrackRole, boolean> = {
+          vocal: true,
+          chords: true,
+          bass: true,
+          lead: false, // keep upper side bleed off initially for cleanest concert sound; user can toggle on anytime
+        };
+        const initialFiltered = filterAndCleanNotes(result.piece, defaultTracks, 'strict');
+
+        setEnabledTracks(defaultTracks);
+        setCleanliness('strict');
         setPieces((prev) => [result.piece, ...prev]);
         setCurrentPieceId(result.piece.id);
         playStateRef.current.piece = result.piece;
+        playStateRef.current.notes = initialFiltered;
         setAnalysisState({ active: false, progress: 1, stage: '', error: null });
 
-        // Automatically start playing the newly transcribed piece on the grand piano!
         window.setTimeout(() => {
           startPlayback(0);
         }, 60);
@@ -409,12 +484,11 @@ export default function App() {
       data-playing={isPlaying ? 'true' : 'false'}
       data-track-source={currentPiece.source}
       data-camera-preset={cameraPreset}
-      data-track-filter={trackFilter}
+      data-cleanliness={cleanliness}
       data-lid-state={lidState}
-      data-note-count={currentPiece.notes.length}
-      className="relative h-full w-full overflow-hidden bg-[#0c0e13]"
+      data-note-count={filteredNotes.length}
+      className="relative h-full w-full overflow-hidden bg-[#161923]"
     >
-      {/* Full-Viewport 3D Concert Grand Piano Stage */}
       <GrandPianoViewport
         ref={viewportRef}
         cameraPreset={cameraPreset}
@@ -424,7 +498,6 @@ export default function App() {
         onUserKeyPlay={handleManualNotePlay}
       />
 
-      {/* Hidden MP3 File Input */}
       <input
         ref={fileInputRef}
         type="file"
@@ -435,28 +508,25 @@ export default function App() {
         className="sr-only"
       />
 
-      {/* Minimal Top-Left Brand & Unboxed Piece Metadata (zero pills, zero side clutter) */}
-      <header className="pointer-events-none fixed left-5 top-5 z-20 max-w-[min(460px,82vw)] sm:left-7 sm:top-6">
+      {/* Minimal Top-Left Brand & Unboxed Metadata */}
+      <header className="pointer-events-none fixed left-5 top-5 z-20 max-w-[min(520px,86vw)] sm:left-7 sm:top-6">
         <h1 className="font-display text-3xl font-medium tracking-tight text-[#f6f1e6] sm:text-4xl">
           Aurelia
         </h1>
         <div
           data-testid="piece-metadata"
-          className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-[#b7b0a3]"
+          className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-[#cfc8bc]"
         >
-          <span className="font-medium text-[#e4dccd]">{currentPiece.title}</span>
+          <span className="font-medium text-[#f5efe4]">{currentPiece.title}</span>
           <span aria-hidden="true">·</span>
           <span>{currentPiece.keySignature}</span>
           <span aria-hidden="true">·</span>
           <span className="font-mono-tabular">{currentPiece.bpm} BPM</span>
           <span aria-hidden="true">·</span>
-          <span className="font-mono-tabular">
-            {currentPiece.pianoNoteCount} piano / {currentPiece.vocalNoteCount} voz
-          </span>
+          <span className="font-mono-tabular">{filteredNotes.length} notas activas</span>
         </div>
       </header>
 
-      {/* Analysis Error Toast (only when an invalid file fails to decode) */}
       {analysisState.error && (
         <div
           role="alert"
@@ -473,7 +543,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Audio Transcription Progress Overlay */}
       {analysisState.active && (
         <div
           role="status"
@@ -484,7 +553,7 @@ export default function App() {
             <div className="flex items-center gap-3">
               <Loader2 className="h-5 w-5 animate-spin text-[#d4a353]" />
               <h2 className="font-display text-2xl font-medium text-[#f6f1e6]">
-                Calculando partitura
+                Limpiando y separando pistas
               </h2>
             </div>
             <p className="mt-2 text-xs text-[#b7b0a3]">{analysisState.stage}</p>
@@ -501,33 +570,35 @@ export default function App() {
         </div>
       )}
 
-      {/* Drag & Drop MP3 Overlay */}
       {isDraggingFile && (
         <div className="pointer-events-none fixed inset-0 z-30 flex items-center justify-center bg-[#0c0e13]/80 p-6">
           <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-[#d4a353] bg-[#14171f] px-10 py-8 text-center">
             <Upload className="h-8 w-8 text-[#d4a353]" />
             <p className="font-display text-2xl text-[#f6f1e6]">Suelta tu archivo MP3</p>
             <p className="text-xs text-[#b7b0a3]">
-              Calcularemos las notas del piano y la melodía de voz automáticamente
+              Eliminaremos percusión y separaremos Voz, Acordes, Bajo y Arreglos en MIDI
             </p>
           </div>
         </div>
       )}
 
-      {/* Unified Collapsible Bottom Control Dock */}
       <ControlDock
         pieces={pieces}
         currentPiece={currentPiece}
+        filteredNotes={filteredNotes}
         onSelectPiece={handleSelectPiece}
         onUploadClick={() => fileInputRef.current?.click()}
+        onExportMidi={handleExportMidi}
         isAnalyzing={analysisState.active}
         isPlaying={isPlaying}
         onTogglePlay={handleTogglePlay}
         onRestart={handleRestart}
         currentTime={currentTime}
         onSeek={handleSeek}
-        trackFilter={trackFilter}
-        onTrackFilterChange={setTrackFilter}
+        enabledTracks={enabledTracks}
+        onToggleTrack={handleToggleTrack}
+        cleanliness={cleanliness}
+        onCleanlinessChange={setCleanliness}
         playbackRate={playbackRate}
         onPlaybackRateChange={setPlaybackRate}
         cameraPreset={cameraPreset}
@@ -541,8 +612,7 @@ export default function App() {
         hasOriginalAudio={hasOriginalAudio}
         mixOriginalAudio={mixOriginalAudio}
         onToggleMixOriginalAudio={() => setMixOriginalAudio((prev) => !prev)}
-        activeVocalMidis={activeVocalMidis}
-        activePianoMidis={activePianoMidis}
+        activeNotesByRole={activeNotesByRole}
         collapsed={dockCollapsed}
         onToggleCollapsed={() => setDockCollapsed((prev) => !prev)}
       />
