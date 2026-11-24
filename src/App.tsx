@@ -1,7 +1,7 @@
 import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, Upload } from 'lucide-react';
 import { DEMO_PIECES } from './audio/demoPieces';
-import { decodeAndTranscribeAudioFile } from './audio/audioTranscriber';
+import { decodeAndTranscribeAudioFile, retranscribeAudioBuffer } from './audio/audioTranscriber';
 import { GrandPianoSynth } from './audio/pianoSynth';
 import { KEYBOARD_KEY_TO_MIDI } from './audio/pianoTheory';
 import {
@@ -10,6 +10,7 @@ import {
   PianoNoteEvent,
   TrackRole,
   TranscribedPiece,
+  TranscriptionMode,
 } from './audio/pitchDsp';
 import { buildMultiTrackMidi } from './audio/midiExporter';
 import { hasMidiHeader, isMidiFile, parseMidiToPiece } from './audio/midiParser';
@@ -41,8 +42,10 @@ export default function App() {
     bass: true,
     lead: true,
   });
-  // Cleanliness filter defaults to 'strict' (Alta) so uploaded MP3s play with minimal noise
+  // Cleanliness filter defaults to 'strict' (Alta) for pop demos; solo piano uploads auto-select 'soft'
   const [cleanliness, setCleanliness] = useState<CleanlinessLevel>('strict');
+  // MP3 transcription preset: defaults to 'piano' (optimized for solo piano recordings)
+  const [transcriptionMode, setTranscriptionMode] = useState<TranscriptionMode>('piano');
 
   const [playbackRate, setPlaybackRate] = useState(1);
   const [cameraPreset, setCameraPreset] = useState<CameraPresetId>('concert');
@@ -444,9 +447,13 @@ export default function App() {
           return;
         }
 
-        const result = await decodeAndTranscribeAudioFile(file, (progress, stage) => {
-          setAnalysisState((prev) => ({ ...prev, progress, stage }));
-        });
+        const result = await decodeAndTranscribeAudioFile(
+          file,
+          (progress, stage) => {
+            setAnalysisState((prev) => ({ ...prev, progress, stage }));
+          },
+          transcriptionMode,
+        );
 
         uploadedBuffersRef.current.set(result.piece.id, result.audioBuffer);
         const defaultTracks: Record<TrackRole, boolean> = {
@@ -455,10 +462,16 @@ export default function App() {
           bass: true,
           lead: true,
         };
-        const initialFiltered = filterAndCleanNotes(result.piece, defaultTracks, 'balanced');
+        const initialCleanliness: CleanlinessLevel =
+          transcriptionMode === 'piano' ? 'soft' : 'balanced';
+        const initialFiltered = filterAndCleanNotes(
+          result.piece,
+          defaultTracks,
+          initialCleanliness,
+        );
 
         setEnabledTracks(defaultTracks);
-        setCleanliness('balanced');
+        setCleanliness(initialCleanliness);
         setPieces((prev) => [result.piece, ...prev]);
         setCurrentPieceId(result.piece.id);
         playStateRef.current.piece = result.piece;
@@ -481,7 +494,65 @@ export default function App() {
         });
       }
     },
-    [cleanliness, startPlayback, stopPlayback],
+    [cleanliness, startPlayback, stopPlayback, transcriptionMode],
+  );
+
+  // Switch between Piano (solo piano MP3s) and Canción (full mix with drums/vocals).
+  // If an uploaded MP3 is currently active, re-transcribe it automatically in the new mode.
+  const handleTranscriptionModeChange = useCallback(
+    async (nextMode: TranscriptionMode) => {
+      setTranscriptionMode(nextMode);
+      const activePiece = playStateRef.current.piece;
+      const buf = uploadedBuffersRef.current.get(activePiece.id);
+      if (!buf || activePiece.source !== 'upload' || activePiece.transcriptionMode === nextMode) {
+        return;
+      }
+
+      stopPlayback(true);
+      setAnalysisState({
+        active: true,
+        progress: 0.08,
+        stage:
+          nextMode === 'piano'
+            ? 'Re-analizando grabación en modo Piano (88 teclas)...'
+            : 'Re-analizando pista en modo Canción (HPSS + Voz)...',
+        error: null,
+      });
+
+      try {
+        const retranscribed = await retranscribeAudioBuffer(
+          buf,
+          activePiece.title,
+          nextMode,
+          (progress, stage) => {
+            setAnalysisState((prev) => ({ ...prev, progress, stage }));
+          },
+        );
+        const updatedPiece: TranscribedPiece = {
+          ...retranscribed,
+          id: activePiece.id,
+        };
+        const nextClean: CleanlinessLevel = nextMode === 'piano' ? 'soft' : 'balanced';
+        const nextFiltered = filterAndCleanNotes(updatedPiece, enabledTracks, nextClean);
+
+        setCleanliness(nextClean);
+        setPieces((prev) => prev.map((p) => (p.id === activePiece.id ? updatedPiece : p)));
+        playStateRef.current.piece = updatedPiece;
+        playStateRef.current.notes = nextFiltered;
+        setAnalysisState({ active: false, progress: 1, stage: '', error: null });
+
+        window.setTimeout(() => {
+          startPlayback(0);
+        }, 60);
+      } catch (err) {
+        const msg =
+          err instanceof Error && err.message
+            ? err.message
+            : 'No se pudo re-analizar el audio en el nuevo modo.';
+        setAnalysisState({ active: false, progress: 0, stage: '', error: msg });
+      }
+    },
+    [enabledTracks, startPlayback, stopPlayback],
   );
 
   const handleFileInputChange = (e: ChangeEvent<HTMLInputElement>) => {
@@ -521,6 +592,7 @@ export default function App() {
       onDrop={handleDrop}
       data-playing={isPlaying ? 'true' : 'false'}
       data-track-source={currentPiece.source}
+      data-transcription-mode={currentPiece.transcriptionMode ?? transcriptionMode}
       data-camera-preset={cameraPreset}
       data-cleanliness={cleanliness}
       data-lid-state={lidState}
@@ -637,6 +709,8 @@ export default function App() {
         onToggleTrack={handleToggleTrack}
         cleanliness={cleanliness}
         onCleanlinessChange={setCleanliness}
+        transcriptionMode={transcriptionMode}
+        onTranscriptionModeChange={handleTranscriptionModeChange}
         playbackRate={playbackRate}
         onPlaybackRateChange={setPlaybackRate}
         cameraPreset={cameraPreset}

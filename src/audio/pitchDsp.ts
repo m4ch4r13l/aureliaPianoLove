@@ -4,6 +4,8 @@ export type TrackRole = 'vocal' | 'chords' | 'bass' | 'lead';
 
 export type CleanlinessLevel = 'soft' | 'balanced' | 'strict';
 
+export type TranscriptionMode = 'piano' | 'song';
+
 export interface PianoNoteEvent {
   id: string;
   midi: number;
@@ -22,6 +24,7 @@ export interface TranscribedPiece {
   title: string;
   subtitle: string;
   source: 'demo' | 'upload' | 'midi';
+  transcriptionMode?: TranscriptionMode;
   duration: number;
   bpm: number;
   keySignature: string;
@@ -1670,9 +1673,41 @@ export function filterAndCleanNotes(
     return piece.notes.filter((n) => enabledTracks[n.track]);
   }
 
+  // Solo piano recordings need full two-handed polyphony, bass octaves, fast 16th/32nd runs,
+  // and unrestricted chromatic/jazz/classical accidentals — never crush them with pop-song gates.
+  if (piece.transcriptionMode === 'piano') {
+    const pianoCfg =
+      cleanliness === 'strict'
+        ? { minConf: 0.44, minDur: 0.075, maxSimulChords: 6 }
+        : cleanliness === 'balanced'
+          ? { minConf: 0.28, minDur: 0.055, maxSimulChords: 8 }
+          : { minConf: 0.14, minDur: 0.042, maxSimulChords: 10 };
+
+    const kept: PianoNoteEvent[] = [];
+    for (const n of piece.notes) {
+      if (!enabledTracks[n.track]) continue;
+      if (n.confidence < pianoCfg.minConf) continue;
+      if (n.duration < pianoCfg.minDur) continue;
+
+      if (n.track === 'chords') {
+        let activeChords = 0;
+        for (let i = kept.length - 1; i >= 0; i--) {
+          const prev = kept[i];
+          if (prev.startTime < n.startTime - 4.0) break;
+          if (prev.startTime + prev.duration <= n.startTime + 0.02) continue;
+          if (prev.track === 'chords') activeChords++;
+        }
+        if (activeChords >= pianoCfg.maxSimulChords) continue;
+      }
+
+      kept.push(n);
+    }
+    return kept;
+  }
+
   const cfg =
     cleanliness === 'strict'
-      ? { minConf: 0.52, minDur: 0.14, requireInKeyBelowConf: 0.80, maxSimulChords: 3, minGap: 0.06 }
+      ? { minConf: 0.52, minDur: 0.14, requireInKeyBelowConf: 0.8, maxSimulChords: 3, minGap: 0.06 }
       : cleanliness === 'balanced'
         ? { minConf: 0.36, minDur: 0.12, requireInKeyBelowConf: 0.65, maxSimulChords: 3, minGap: 0.04 }
         : { minConf: 0.18, minDur: 0.08, requireInKeyBelowConf: 0.0, maxSimulChords: 4, minGap: 0.0 };

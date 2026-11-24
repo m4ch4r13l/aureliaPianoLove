@@ -17,6 +17,7 @@ import {
   PianoNoteEvent,
   TrackRole,
   TranscribedPiece,
+  TranscriptionMode,
 } from '../audio/pitchDsp';
 import { CameraPresetId } from './GrandPianoViewport';
 import { LidState } from '../three/grandPianoBuilder';
@@ -50,6 +51,8 @@ interface ControlDockProps {
   onToggleTrack: (role: TrackRole) => void;
   cleanliness: CleanlinessLevel;
   onCleanlinessChange: (level: CleanlinessLevel) => void;
+  transcriptionMode: TranscriptionMode;
+  onTranscriptionModeChange: (mode: TranscriptionMode) => void;
   playbackRate: number;
   onPlaybackRateChange: (rate: number) => void;
   cameraPreset: CameraPresetId;
@@ -85,6 +88,8 @@ export function ControlDock({
   onToggleTrack,
   cleanliness,
   onCleanlinessChange,
+  transcriptionMode,
+  onTranscriptionModeChange,
   playbackRate,
   onPlaybackRateChange,
   cameraPreset,
@@ -283,13 +288,20 @@ export function ControlDock({
                 {INSTRUMENT_TRACKS.map((inst) => {
                   const active = enabledTracks[inst.role];
                   const count = filteredNotes.filter((n) => n.track === inst.role).length;
+                  const isPianoPiece = currentPiece.transcriptionMode === 'piano';
+                  const displayLabel =
+                    isPianoPiece && inst.role === 'vocal'
+                      ? 'Melodía'
+                      : isPianoPiece && inst.role === 'lead'
+                        ? 'Agudos'
+                        : inst.label;
                   return (
                     <button
                       key={inst.role}
                       type="button"
                       onClick={() => onToggleTrack(inst.role)}
                       aria-pressed={active}
-                      aria-label={`${active ? 'Silenciar' : 'Activar'} pista ${inst.label}`}
+                      aria-label={`${active ? 'Silenciar' : 'Activar'} pista ${displayLabel}`}
                       className={`inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
                         active
                           ? 'border-white/18 bg-[#222632] text-[#f6f1e6]'
@@ -304,11 +316,43 @@ export function ControlDock({
                           opacity: active ? 1 : 0.25,
                         }}
                       />
-                      <span>{inst.label}</span>
+                      <span>{displayLabel}</span>
                       <span className="font-mono-tabular text-[10px] text-[#8d877d]">{count}</span>
                     </button>
                   );
                 })}
+              </div>
+            </div>
+
+            {/* MP3 Transcription Mode (Solo Piano vs Full Mixed Song) */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-[#9c968b] whitespace-nowrap">Modo</span>
+              <div
+                role="group"
+                aria-label="Modo de transcripción MP3"
+                className="flex items-center rounded-lg border border-white/10 bg-[#14171f] p-0.5"
+              >
+                {(
+                  [
+                    { id: 'piano', label: 'Piano' },
+                    { id: 'song', label: 'Canción' },
+                  ] as const
+                ).map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    disabled={isAnalyzing}
+                    onClick={() => onTranscriptionModeChange(m.id)}
+                    aria-pressed={transcriptionMode === m.id}
+                    className={`rounded-md px-2 py-1 text-xs font-medium transition-colors disabled:opacity-50 whitespace-nowrap shrink-0 ${
+                      transcriptionMode === m.id
+                        ? 'bg-[#2a2318] text-[#f5dfb8]'
+                        : 'text-[#9c968b] hover:text-[#e4ded3]'
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
               </div>
             </div>
 
@@ -475,7 +519,7 @@ export function ControlDock({
             {/* Quiet unboxed live notes readout */}
             <div className="flex flex-wrap items-center gap-2.5 text-[11px] text-[#9c968b]">
               <span>
-                Voz:{' '}
+                {currentPiece.transcriptionMode === 'piano' ? 'Melodía' : 'Voz'}:{' '}
                 <span data-testid="active-vocal-notes" className="font-mono-tabular text-[#f4d8dc]">
                   {formatRoleNotes(activeNotesByRole.vocal, 2)}
                 </span>
