@@ -12,6 +12,7 @@ import {
   TranscribedPiece,
 } from './audio/pitchDsp';
 import { buildMultiTrackMidi } from './audio/midiExporter';
+import { hasMidiHeader, isMidiFile, parseMidiToPiece } from './audio/midiParser';
 import {
   CameraPresetId,
   GrandPianoViewport,
@@ -407,6 +408,42 @@ export default function App() {
       });
 
       try {
+        const headerBytes = new Uint8Array(await file.slice(0, 128).arrayBuffer());
+        const treatAsMidi = isMidiFile(file) || hasMidiHeader(headerBytes);
+
+        if (treatAsMidi) {
+          setAnalysisState({
+            active: true,
+            progress: 0.45,
+            stage: `Leyendo pistas MIDI de "${file.name}"...`,
+            error: null,
+          });
+          const fullBytes = new Uint8Array(await file.arrayBuffer());
+          const cleanName =
+            file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim() || 'Archivo MIDI';
+          const midiPiece = parseMidiToPiece(fullBytes, cleanName);
+          const allTracks: Record<TrackRole, boolean> = {
+            vocal: true,
+            chords: true,
+            bass: true,
+            lead: true,
+          };
+          const initialFiltered = filterAndCleanNotes(midiPiece, allTracks, cleanliness);
+
+          setEnabledTracks(allTracks);
+          setMixOriginalAudio(false);
+          setPieces((prev) => [midiPiece, ...prev]);
+          setCurrentPieceId(midiPiece.id);
+          playStateRef.current.piece = midiPiece;
+          playStateRef.current.notes = initialFiltered;
+          setAnalysisState({ active: false, progress: 1, stage: '', error: null });
+
+          window.setTimeout(() => {
+            startPlayback(0);
+          }, 60);
+          return;
+        }
+
         const result = await decodeAndTranscribeAudioFile(file, (progress, stage) => {
           setAnalysisState((prev) => ({ ...prev, progress, stage }));
         });
@@ -435,7 +472,7 @@ export default function App() {
         const msg =
           err instanceof Error && err.message
             ? err.message
-            : 'No se pudo decodificar el archivo de audio. Prueba con un MP3 o WAV válido.';
+            : 'No se pudo leer el archivo. Prueba con un MP3, WAV o MIDI (.mid) válido.';
         setAnalysisState({
           active: false,
           progress: 0,
@@ -444,7 +481,7 @@ export default function App() {
         });
       }
     },
-    [startPlayback, stopPlayback],
+    [cleanliness, startPlayback, stopPlayback],
   );
 
   const handleFileInputChange = (e: ChangeEvent<HTMLInputElement>) => {
@@ -502,9 +539,9 @@ export default function App() {
       <input
         ref={fileInputRef}
         type="file"
-        accept="audio/*,.mp3,.wav,.ogg,.m4a"
+        accept="audio/*,.mp3,.wav,.ogg,.m4a,.mid,.midi,.kar,audio/midi,audio/x-midi"
         onChange={handleFileInputChange}
-        aria-label="Seleccionar archivo MP3 o de audio"
+        aria-label="Seleccionar archivo MP3, audio o MIDI"
         data-testid="mp3-file-input"
         className="sr-only"
       />
@@ -575,9 +612,9 @@ export default function App() {
         <div className="pointer-events-none fixed inset-0 z-30 flex items-center justify-center bg-[#0c0e13]/80 p-6">
           <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-[#d4a353] bg-[#14171f] px-10 py-8 text-center">
             <Upload className="h-8 w-8 text-[#d4a353]" />
-            <p className="font-display text-2xl text-[#f6f1e6]">Suelta tu archivo MP3</p>
+            <p className="font-display text-2xl text-[#f6f1e6]">Suelta tu archivo MP3 o MIDI</p>
             <p className="text-xs text-[#b7b0a3]">
-              Eliminaremos percusión y separaremos Voz, Acordes, Bajo y Arreglos en MIDI
+              Reproduce archivos .mid directamente o convierte tu MP3 en 4 pistas limpias
             </p>
           </div>
         </div>

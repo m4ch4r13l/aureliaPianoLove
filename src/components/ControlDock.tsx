@@ -248,11 +248,11 @@ export function ControlDock({
                 type="button"
                 onClick={onUploadClick}
                 disabled={isAnalyzing}
-                aria-label="Subir archivo MP3 para calcular notas"
+                aria-label="Subir archivo MP3 o MIDI para reproducir en el piano"
                 className="inline-flex h-10 items-center gap-2 rounded-lg border border-[#d4a353]/50 bg-[#1e1a14] px-3.5 text-sm font-medium text-[#f5dfb8] transition-colors hover:border-[#d4a353] hover:bg-[#2a2318] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d4a353] whitespace-nowrap shrink-0"
               >
                 <Upload className="h-4 w-4 text-[#d4a353]" />
-                <span>Subir MP3</span>
+                <span>Subir MP3 / MIDI</span>
               </button>
 
               <button
@@ -357,7 +357,11 @@ export function ControlDock({
               >
                 {pieces.map((p) => (
                   <option key={p.id} value={p.id} className="bg-[#14171f] text-[#f3efe7]">
-                    {p.source === 'upload' ? `${p.title} (MP3)` : p.title}
+                    {p.source === 'upload'
+                      ? `${p.title} (MP3)`
+                      : p.source === 'midi'
+                        ? `${p.title} (MIDI)`
+                        : p.title}
                   </option>
                 ))}
               </select>

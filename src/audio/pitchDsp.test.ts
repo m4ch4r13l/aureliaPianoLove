@@ -15,6 +15,8 @@ import {
   transcribePcmToPianoAndVocalAsync,
 } from './pitchDsp';
 import { buildMultiTrackMidi } from './midiExporter';
+import { hasMidiHeader, parseMidiToPiece } from './midiParser';
+import { DEMO_PIECES } from './demoPieces';
 
 test('88-key grand piano layout generates 52 white and 36 black keys in ascending X order', () => {
   const { keys } = build88KeyLayout();
@@ -221,4 +223,83 @@ test('New Constant-Q + Chord HMM engine cleanly separates vocal, bass, and voice
   assert.equal(String.fromCharCode(...midiBytes.slice(0, 4)), 'MThd');
   assert.equal(midiBytes[9], 1, 'MIDI file must be Format 1 (multi-track)');
   assert.ok(midiBytes[11] >= 2, 'MIDI file must include tempo track + instrument track(s)');
+});
+
+test('parseMidiToPiece round-trips multi-track Format 1 MIDI preserving all 4 instrument tracks and BPM', () => {
+  const sourceDemo = DEMO_PIECES[0];
+  const midiBytes = buildMultiTrackMidi(sourceDemo, sourceDemo.notes);
+  assert.equal(hasMidiHeader(midiBytes), true);
+
+  const parsed = parseMidiToPiece(midiBytes, 'Nocturno Importado');
+  assert.equal(parsed.source, 'midi');
+  assert.equal(parsed.title, 'Nocturno Importado');
+  assert.equal(parsed.bpm, sourceDemo.bpm);
+  assert.equal(parsed.countsByTrack.vocal, sourceDemo.countsByTrack.vocal);
+  assert.equal(parsed.countsByTrack.chords, sourceDemo.countsByTrack.chords);
+  assert.equal(parsed.countsByTrack.bass, sourceDemo.countsByTrack.bass);
+  assert.equal(parsed.countsByTrack.lead, sourceDemo.countsByTrack.lead);
+  assert.equal(parsed.notes.length, sourceDemo.notes.length);
+
+  // Verify filterAndCleanNotes preserves 100% of imported MIDI notes regardless of strict cleanliness
+  const strictFiltered = filterAndCleanNotes(
+    parsed,
+    { vocal: true, chords: true, bass: true, lead: true },
+    'strict',
+  );
+  assert.equal(strictFiltered.length, parsed.notes.length);
+});
+
+test('parseMidiToPiece handles Format 0 running status, Note-On vel=0, tempo changes, sustain CC64, and skips ch10 drums', () => {
+  // Hand-crafted Format 0 MIDI at 480 PPQN:
+  // t=0: Tempo 120 BPM (500,000 us), Key C major
+  // t=0: Ch0 NoteOn C4 (60) vel 100, running status E4 (64) vel 90, Ch9 Drum (36) vel 120
+  // t=480 (0.5s): Ch0 Sustain CC64 = 127, NoteOn C4 vel 0 (held by sustain), NoteOn E4 vel 0, Ch9 Drum off
+  // t=480: Tempo change -> 60 BPM (1,000,000 us)
+  // t=960 (0.5 + 1.0 = 1.5s): Sustain CC64 = 0 (releases C4 and E4 at 1.5s!)
+  const trackEvents = [
+    // Meta Tempo 120 BPM (500000 = 0x07A120)
+    0x00, 0xff, 0x51, 0x03, 0x07, 0xa1, 0x20,
+    // Meta Key Signature C major
+    0x00, 0xff, 0x59, 0x02, 0x00, 0x00,
+    // Ch0 NoteOn C4 (60), vel 100
+    0x00, 0x90, 60, 100,
+    // Running status (no status byte): NoteOn E4 (64), vel 90
+    0x00, 64, 90,
+    // Ch9 (GM Drums) NoteOn kick (36), vel 120 -> must be skipped
+    0x00, 0x99, 36, 120,
+    // Delta 480 (0x83 0x60): Ch0 Sustain Pedal Down (CC64=127)
+    0x83, 0x60, 0xb0, 64, 127,
+    // Delta 0: Ch0 NoteOn C4 vel 0 (Note Off while sustain is down)
+    0x00, 0x90, 60, 0,
+    // Running status NoteOn E4 vel 0
+    0x00, 64, 0,
+    // Ch9 Drum off
+    0x00, 0x89, 36, 0,
+    // Tempo change to 60 BPM (1000000 = 0x0F4240)
+    0x00, 0xff, 0x51, 0x03, 0x0f, 0x42, 0x40,
+    // Delta 480 (1.0s at 60 BPM): Sustain Pedal Up (CC64=0)
+    0x83, 0x60, 0xb0, 64, 0,
+    // End of Track
+    0x00, 0xff, 0x2f, 0x00,
+  ];
+
+  const bytes = new Uint8Array(14 + 8 + trackEvents.length);
+  // MThd header (Format 0, 1 track, 480 PPQN)
+  bytes.set([0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 0, 0, 1, 0x01, 0xe0], 0);
+  // MTrk header
+  const len = trackEvents.length;
+  bytes.set([0x4d, 0x54, 0x72, 0x6b, (len >>> 24) & 0xff, (len >>> 16) & 0xff, (len >>> 8) & 0xff, len & 0xff], 14);
+  bytes.set(trackEvents, 22);
+
+  const parsed = parseMidiToPiece(bytes, 'Prueba Formato 0');
+  assert.equal(parsed.bpm, 120);
+  assert.equal(parsed.keySignature, 'Do mayor');
+  // Drum note on channel 9 must be skipped -> exactly 2 melodic notes (C4 & E4)
+  assert.equal(parsed.notes.length, 2);
+  assert.deepEqual(
+    parsed.notes.map((n) => n.midi),
+    [60, 64],
+  );
+  // Sustained across the tempo change (0.5s at 120 BPM + 1.0s at 60 BPM = 1.5s duration)
+  assert.ok(Math.abs(parsed.notes[0].duration - 1.5) < 0.02, `Expected ~1.5s sustain, got ${parsed.notes[0].duration}`);
 });

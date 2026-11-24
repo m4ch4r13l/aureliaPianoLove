@@ -21,7 +21,7 @@ export interface TranscribedPiece {
   id: string;
   title: string;
   subtitle: string;
-  source: 'demo' | 'upload';
+  source: 'demo' | 'upload' | 'midi';
   duration: number;
   bpm: number;
   keySignature: string;
@@ -1666,7 +1666,7 @@ export function filterAndCleanNotes(
   enabledTracks: Record<TrackRole, boolean>,
   cleanliness: CleanlinessLevel,
 ): PianoNoteEvent[] {
-  if (piece.source === 'demo') {
+  if (piece.source === 'demo' || piece.source === 'midi') {
     return piece.notes.filter((n) => enabledTracks[n.track]);
   }
 
