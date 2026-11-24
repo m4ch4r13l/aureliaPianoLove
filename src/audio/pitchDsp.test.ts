@@ -17,6 +17,10 @@ import {
 import { buildMultiTrackMidi } from './midiExporter';
 import { hasMidiHeader, parseMidiToPiece } from './midiParser';
 import { DEMO_PIECES } from './demoPieces';
+import {
+  classifyBasicPitchNotesToPiece,
+  estimateBpmFromNoteOnsets,
+} from './basicPitchTranscriber';
 
 test('88-key grand piano layout generates 52 white and 36 black keys in ascending X order', () => {
   const { keys } = build88KeyLayout();
@@ -302,4 +306,42 @@ test('parseMidiToPiece handles Format 0 running status, Note-On vel=0, tempo cha
   );
   // Sustained across the tempo change (0.5s at 120 BPM + 1.0s at 60 BPM = 1.5s duration)
   assert.ok(Math.abs(parsed.notes[0].duration - 1.5) < 0.02, `Expected ~1.5s sustain, got ${parsed.notes[0].duration}`);
+});
+
+test('classifyBasicPitchNotesToPiece separates neural detections into vocal, bass, chords, lead and exports valid @tonejs/midi', () => {
+  // Simulated Basic Pitch NoteEventTime[] for 120 BPM (0.5s beat) C-major progression
+  const bpNotes = [
+    // Beat 0: C2 bass (36), C4-E4-G4 chord (60,64,67), E5 vibrato vocal (76)
+    { startTimeSeconds: 0.0, durationSeconds: 1.0, pitchMidi: 36, amplitude: 0.72 },
+    { startTimeSeconds: 0.01, durationSeconds: 0.9, pitchMidi: 60, amplitude: 0.55 },
+    { startTimeSeconds: 0.02, durationSeconds: 0.9, pitchMidi: 64, amplitude: 0.52 },
+    { startTimeSeconds: 0.01, durationSeconds: 0.9, pitchMidi: 67, amplitude: 0.50 },
+    { startTimeSeconds: 0.0, durationSeconds: 0.48, pitchMidi: 76, amplitude: 0.85, pitchBends: [0, 1, -1, 1, 0] },
+    // Beat 1: vocal moves to G5 (79), micro-glitch 0.02s must be dropped
+    { startTimeSeconds: 0.5, durationSeconds: 0.48, pitchMidi: 79, amplitude: 0.88, pitchBends: [0, 1, 0, -1] },
+    { startTimeSeconds: 0.52, durationSeconds: 0.02, pitchMidi: 90, amplitude: 0.2 },
+    // Beat 2: F2 bass (41), F3-A3-C4 chord (53,57,60), A5 high lead (81), F5 vocal (77)
+    { startTimeSeconds: 1.0, durationSeconds: 1.0, pitchMidi: 41, amplitude: 0.74 },
+    { startTimeSeconds: 1.01, durationSeconds: 0.9, pitchMidi: 53, amplitude: 0.54 },
+    { startTimeSeconds: 1.01, durationSeconds: 0.9, pitchMidi: 57, amplitude: 0.52 },
+    { startTimeSeconds: 1.0, durationSeconds: 0.5, pitchMidi: 77, amplitude: 0.86, pitchBends: [0, 1, -1, 1] },
+    { startTimeSeconds: 1.5, durationSeconds: 0.45, pitchMidi: 84, amplitude: 0.62 },
+  ];
+
+  const bpm = estimateBpmFromNoteOnsets(bpNotes);
+  assert.ok(bpm >= 115 && bpm <= 125, `Expected ~120 BPM, got ${bpm}`);
+
+  const piece = classifyBasicPitchNotesToPiece(bpNotes, 2.2, 'Prueba Basic Pitch');
+  assert.equal(piece.source, 'upload');
+  assert.ok(piece.countsByTrack.bass >= 2, 'Must classify bass notes');
+  assert.ok(piece.countsByTrack.vocal >= 2, 'Must classify vocal melody notes');
+  assert.ok(piece.countsByTrack.chords >= 3, 'Must classify chord accompaniment notes');
+  // Micro-glitch (0.02s) must be filtered out
+  assert.equal(piece.notes.length, bpNotes.length - 1);
+
+  // Round-trip through @tonejs/midi exporter + parser
+  const midiBytes = buildMultiTrackMidi(piece, piece.notes);
+  const reimported = parseMidiToPiece(midiBytes, 'Basic Pitch Roundtrip');
+  assert.equal(reimported.notes.length, piece.notes.length);
+  assert.equal(reimported.bpm, piece.bpm);
 });

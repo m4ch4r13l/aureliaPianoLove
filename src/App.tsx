@@ -453,12 +453,12 @@ export default function App() {
           vocal: true,
           chords: true,
           bass: true,
-          lead: false, // keep upper side bleed off initially for cleanest concert sound; user can toggle on anytime
+          lead: true,
         };
-        const initialFiltered = filterAndCleanNotes(result.piece, defaultTracks, 'strict');
+        const initialFiltered = filterAndCleanNotes(result.piece, defaultTracks, 'balanced');
 
         setEnabledTracks(defaultTracks);
-        setCleanliness('strict');
+        setCleanliness('balanced');
         setPieces((prev) => [result.piece, ...prev]);
         setCurrentPieceId(result.piece.id);
         playStateRef.current.piece = result.piece;
