@@ -1,0 +1,6 @@
+{
+  "name": "Aurelia Piano de Cola 3D",
+  "description": "Escena 3D interactiva en Three.js de un piano de cola central que analiza archivos MP3 para calcular las notas de piano y la melodía vocal y reproducirlas en tiempo real.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
