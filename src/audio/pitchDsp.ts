@@ -4,7 +4,7 @@ export type TrackRole = 'vocal' | 'chords' | 'bass' | 'lead';
 
 export type CleanlinessLevel = 'soft' | 'balanced' | 'strict';
 
-export type TranscriptionMode = 'piano' | 'song';
+export type TranscriptionMode = 'piano-hd' | 'piano' | 'song';
 
 export interface PianoNoteEvent {
   id: string;
@@ -1673,9 +1673,9 @@ export function filterAndCleanNotes(
     return piece.notes.filter((n) => enabledTracks[n.track]);
   }
 
-  // Solo piano recordings need full two-handed polyphony, bass octaves, fast 16th/32nd runs,
-  // and unrestricted chromatic/jazz/classical accidentals — never crush them with pop-song gates.
-  if (piece.transcriptionMode === 'piano') {
+  // Solo piano recordings (ByteDance CRNN & Basic Pitch Piano) need full two-handed polyphony,
+  // bass octaves, fast 16th/32nd runs, and unrestricted chromatic/jazz/classical accidentals.
+  if (piece.transcriptionMode === 'piano-hd' || piece.transcriptionMode === 'piano') {
     const pianoCfg =
       cleanliness === 'strict'
         ? { minConf: 0.44, minDur: 0.075, maxSimulChords: 6 }

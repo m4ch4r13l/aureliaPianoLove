@@ -899,10 +899,11 @@ export async function transcribeAudioBufferWithBasicPitch(
   onProgress?.(0.06, 'Remuestreando audio a 22.05 kHz...');
   const { left, right } = await resampleBufferToStereo22050(audioBuffer, 210);
 
+  const isPiano = mode === 'piano' || mode === 'piano-hd';
   let modelInputPcm: Float32Array;
   let centerProfile: StereoCenterProfile | null = null;
 
-  if (mode === 'piano') {
+  if (isPiano) {
     onProgress?.(0.14, 'Optimizando ataque de martillos y rango de 88 teclas (modo Piano)...');
     modelInputPcm = preprocessSoloPianoForBasicPitch(left, right, BASIC_PITCH_SAMPLE_RATE);
   } else {
@@ -929,7 +930,7 @@ export async function transcribeAudioBufferWithBasicPitch(
 
   onProgress?.(
     0.28,
-    mode === 'piano'
+    isPiano
       ? 'Transcribiendo polifonía completa de piano con Basic Pitch...'
       : 'Transcribiendo señal armónica limpia con Basic Pitch...',
   );
@@ -949,7 +950,7 @@ export async function transcribeAudioBufferWithBasicPitch(
         const clamped = Math.max(0, Math.min(1, percent));
         onProgress?.(
           0.28 + clamped * 0.62,
-          mode === 'piano'
+          isPiano
             ? `Transcribiendo piano con Basic Pitch (${Math.round(clamped * 100)}%)...`
             : `Transcribiendo canción con Basic Pitch (${Math.round(clamped * 100)}%)...`,
         );
@@ -959,24 +960,23 @@ export async function transcribeAudioBufferWithBasicPitch(
     tf.engine().endScope();
   }
 
-  if (mode === 'piano') {
+  if (isPiano) {
     onProgress?.(0.92, 'Reconstruyendo acordes, pedal y melodía de piano...');
     // Piano-calibrated Basic Pitch decoding:
-    //   - melodiaTrick = FALSE: critical so inner voices in 4-8 note piano chords are NOT stripped!
-    //   - 27 Hz .. 4200 Hz: full 88-key piano coverage (A0 .. C8)
+    //   - melodiaTrick = true: recovers sustained soft piano notes whose onsets were below threshold
+    //   - 27 Hz .. 4300 Hz: full 88-key piano coverage (A0 .. C8 without truncating C8)
     //   - minNoteLen = 4 (~46 ms): captures fast 16th/32nd piano passages & grace notes
-    //   - onsetThresh = 0.44 / frameThresh = 0.28: sensitive to delicate pianissimo notes & pedal tails
     const rawPoly = outputToNotesPoly(
       frames,
       onsets,
-      0.44,  // onsetThresh
-      0.28,  // frameThresh
-      4,     // minNoteLen (~46 ms)
-      true,  // inferOnsets (detects repeated strikes under sustain pedal)
-      4200,  // maxFreq (C8 = 4186 Hz)
-      27,    // minFreq (A0 = 27.5 Hz)
-      false, // melodiaTrick = false -> preserves full polyphonic piano voicings!
-      11,    // energyTolerance
+      0.45, // onsetThresh
+      0.28, // frameThresh
+      4,    // minNoteLen (~46 ms)
+      true, // inferOnsets (detects repeated strikes under sustain pedal)
+      4300, // maxFreq (clears C8 = 4186 Hz cleanly)
+      27,   // minFreq (A0 = 27.5 Hz)
+      true, // melodiaTrick = true -> recovers soft sustained piano notes from remainingEnergy
+      11,   // energyTolerance
     );
     const noteEvents = noteFramesToTime(rawPoly);
     const piece = classifyPianoRecordingToPiece(

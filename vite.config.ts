@@ -8,17 +8,27 @@ const BASIC_PITCH_MODEL_DIR = path.resolve(
   __dirname,
   'node_modules/@spotify/basic-pitch/model',
 );
+const ORT_DIST_DIR = path.resolve(__dirname, 'node_modules/onnxruntime-web/dist');
+const ORT_RUNTIME_FILES = [
+  'ort-wasm-simd-threaded.wasm',
+  'ort-wasm-simd-threaded.mjs',
+  'ort-wasm-simd-threaded.jsep.wasm',
+  'ort-wasm-simd-threaded.jsep.mjs',
+];
 
 export default defineConfig(() => {
   return {
     base: './',
+    optimizeDeps: {
+      exclude: ['onnxruntime-web'],
+    },
     plugins: [
       react(),
       tailwindcss(),
-      // Serves @spotify/basic-pitch TFJS model files in dev and bundles them into
-      // dist/basic-pitch-model/ for GitHub Pages & production builds (zero CDN needed).
+      // Serves @spotify/basic-pitch TFJS model files and onnxruntime-web WASM assets in dev
+      // and bundles them into dist/ for GitHub Pages & production builds.
       {
-        name: 'basic-pitch-model-assets',
+        name: 'neural-audio-runtime-assets',
         configureServer(server) {
           server.middlewares.use('/basic-pitch-model', (req, res, next) => {
             const rawUrl = (req.url || '/').split('?')[0].replace(/^\/+/, '');
@@ -33,6 +43,29 @@ export default defineConfig(() => {
                 rawUrl.endsWith('.json')
                   ? 'application/json; charset=utf-8'
                   : 'application/octet-stream',
+              );
+              res.setHeader('Cache-Control', 'public, max-age=3600');
+              fs.createReadStream(filePath).pipe(res);
+              return;
+            }
+            next();
+          });
+
+          server.middlewares.use('/ort', (req, res, next) => {
+            const rawUrl = (req.url || '/').split('?')[0].replace(/^\/+/, '');
+            if (!rawUrl || rawUrl.includes('..')) {
+              next();
+              return;
+            }
+            const filePath = path.join(ORT_DIST_DIR, rawUrl);
+            if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+              res.setHeader(
+                'Content-Type',
+                rawUrl.endsWith('.wasm')
+                  ? 'application/wasm'
+                  : rawUrl.endsWith('.mjs') || rawUrl.endsWith('.js')
+                    ? 'application/javascript; charset=utf-8'
+                    : 'application/octet-stream',
               );
               res.setHeader('Cache-Control', 'public, max-age=3600');
               fs.createReadStream(filePath).pipe(res);
@@ -55,6 +88,16 @@ export default defineConfig(() => {
               path.join(distDir, 'basic-pitch-model'),
               {recursive: true, force: true},
             );
+          }
+          if (fs.existsSync(ORT_DIST_DIR)) {
+            const distOrt = path.join(distDir, 'ort');
+            fs.mkdirSync(distOrt, {recursive: true});
+            for (const fname of ORT_RUNTIME_FILES) {
+              const srcFile = path.join(ORT_DIST_DIR, fname);
+              if (fs.existsSync(srcFile)) {
+                fs.copyFileSync(srcFile, path.join(distOrt, fname));
+              }
+            }
           }
         },
       },

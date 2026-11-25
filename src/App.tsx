@@ -44,8 +44,8 @@ export default function App() {
   });
   // Cleanliness filter defaults to 'strict' (Alta) for pop demos; solo piano uploads auto-select 'soft'
   const [cleanliness, setCleanliness] = useState<CleanlinessLevel>('strict');
-  // MP3 transcription preset: defaults to 'piano' (optimized for solo piano recordings)
-  const [transcriptionMode, setTranscriptionMode] = useState<TranscriptionMode>('piano');
+  // MP3 transcription preset: defaults to 'piano-hd' (ByteDance High-Resolution Piano CRNN, 96.7% MAESTRO F1)
+  const [transcriptionMode, setTranscriptionMode] = useState<TranscriptionMode>('piano-hd');
 
   const [playbackRate, setPlaybackRate] = useState(1);
   const [cameraPreset, setCameraPreset] = useState<CameraPresetId>('concert');
@@ -463,7 +463,7 @@ export default function App() {
           lead: true,
         };
         const initialCleanliness: CleanlinessLevel =
-          transcriptionMode === 'piano' ? 'soft' : 'balanced';
+          transcriptionMode === 'song' ? 'balanced' : 'soft';
         const initialFiltered = filterAndCleanNotes(
           result.piece,
           defaultTracks,
@@ -497,7 +497,7 @@ export default function App() {
     [cleanliness, startPlayback, stopPlayback, transcriptionMode],
   );
 
-  // Switch between Piano (solo piano MP3s) and Canción (full mix with drums/vocals).
+  // Switch between Piano IA (ByteDance CRNN), Rápido (Basic Pitch), and Canción (HPSS + Voz).
   // If an uploaded MP3 is currently active, re-transcribe it automatically in the new mode.
   const handleTranscriptionModeChange = useCallback(
     async (nextMode: TranscriptionMode) => {
@@ -511,11 +511,13 @@ export default function App() {
       stopPlayback(true);
       setAnalysisState({
         active: true,
-        progress: 0.08,
+        progress: 0.06,
         stage:
-          nextMode === 'piano'
-            ? 'Re-analizando grabación en modo Piano (88 teclas)...'
-            : 'Re-analizando pista en modo Canción (HPSS + Voz)...',
+          nextMode === 'piano-hd'
+            ? 'Analizando con IA ByteDance Piano (alta precisión)...'
+            : nextMode === 'piano'
+              ? 'Re-analizando en modo Piano rápido (Basic Pitch)...'
+              : 'Re-analizando pista en modo Canción (HPSS + Voz)...',
         error: null,
       });
 
@@ -532,7 +534,7 @@ export default function App() {
           ...retranscribed,
           id: activePiece.id,
         };
-        const nextClean: CleanlinessLevel = nextMode === 'piano' ? 'soft' : 'balanced';
+        const nextClean: CleanlinessLevel = nextMode === 'song' ? 'balanced' : 'soft';
         const nextFiltered = filterAndCleanNotes(updatedPiece, enabledTracks, nextClean);
 
         setCleanliness(nextClean);

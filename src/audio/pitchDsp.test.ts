@@ -31,6 +31,7 @@ import {
   preprocessSoloPianoForBasicPitch,
   queryCenterScore,
 } from './harmonicPreprocessor';
+import { decodeByteDanceOutputsToPiece } from './bytedancePianoTranscriber';
 
 test('88-key grand piano layout generates 52 white and 36 black keys in ascending X order', () => {
   const { keys } = build88KeyLayout();
@@ -535,5 +536,70 @@ test('Solo Piano optimization preserves 88-key range, left-hand bass octaves, ri
   );
   assert.equal(filtered.length, piece.notes.length);
 });
+
+test('decodeByteDanceOutputsToPiece decodes high-res regression onsets, offsets, velocity, sustain pedal, and re-strikes', () => {
+  const T = 250; // 2.5 seconds @ 100 fps
+  const P = 88;
+  const regOnset = new Float32Array(T * P);
+  const regOffset = new Float32Array(T * P);
+  const frame = new Float32Array(T * P);
+  const velocity = new Float32Array(T * P);
+  const pedalFrame = new Float32Array(T);
+  const pedalOffset = new Float32Array(T);
+
+  const keyC4 = 60 - 21;
+  const keyE4 = 64 - 21;
+  const keyC2 = 36 - 21;
+
+  // Note 1: C2 bass onset at frame 20 (0.20s), frame drops at 60, held by sustain pedal until frame 140 (1.40s)!
+  regOnset[19 * P + keyC2] = 0.5;
+  regOnset[20 * P + keyC2] = 0.92;
+  regOnset[21 * P + keyC2] = 0.5;
+  velocity[20 * P + keyC2] = 0.65;
+  for (let t = 20; t < 60; t++) frame[t * P + keyC2] = 0.85;
+  for (let t = 20; t < 140; t++) pedalFrame[t] = 0.9;
+  pedalOffset[140] = 0.85;
+
+  // Note 2: C4 onset at frame 20 (0.20s), offset regression peak at frame 80 (0.80s) (pedal is up after 140, so test C4 re-strike at frame 90!)
+  regOnset[20 * P + keyC4] = 0.88;
+  velocity[20 * P + keyC4] = 0.55;
+  for (let t = 20; t < 88; t++) frame[t * P + keyC4] = 0.8;
+
+  // Note 3: C4 re-strike at frame 90 (0.90s), frame stays active until 170 (1.70s), regOffset peak at 170
+  regOnset[89 * P + keyC4] = 0.4;
+  regOnset[90 * P + keyC4] = 0.9;
+  regOnset[91 * P + keyC4] = 0.55; // slight positive skew -> parabolic shift > 0.90s
+  velocity[90 * P + keyC4] = 0.72;
+  for (let t = 90; t <= 170; t++) frame[t * P + keyC4] = 0.82;
+  regOffset[170 * P + keyC4] = 0.85;
+
+  // Note 4: E4 onset at frame 150 (1.50s), soft velocity 0.20, ends via regOffset at frame 190 (1.90s)
+  regOnset[150 * P + keyE4] = 0.84;
+  velocity[150 * P + keyE4] = 0.2;
+  for (let t = 150; t <= 190; t++) frame[t * P + keyE4] = 0.75;
+  regOffset[190 * P + keyE4] = 0.8;
+
+  const piece = decodeByteDanceOutputsToPiece(
+    { numFrames: T, regOnset, regOffset, frame, velocity, pedalFrame, pedalOffset },
+    2.5,
+    'Prueba ByteDance CRNN',
+  );
+
+  assert.equal(piece.notes.length, 4);
+
+  const bass = piece.notes.find((n) => n.midi === 36)!;
+  assert.equal(bass.track, 'bass');
+  // Held by sustain pedal until ~1.40s -> duration ~1.20s
+  assert.ok(bass.duration >= 1.15 && bass.duration <= 1.25, `Expected sustain pedal duration ~1.2s, got ${bass.duration}`);
+
+  const c4Notes = piece.notes.filter((n) => n.midi === 60);
+  assert.equal(c4Notes.length, 2, 'Must detect C4 re-strike cleanly');
+  // First C4 must trim before second C4 attack (no overlap)
+  assert.ok(c4Notes[0].startTime + c4Notes[0].duration <= c4Notes[1].startTime + 0.002);
+  // Second C4 velocity > E4 soft velocity
+  const e4 = piece.notes.find((n) => n.midi === 64)!;
+  assert.ok(c4Notes[1].velocity > e4.velocity + 0.2, `Expected louder velocity on C4 (${c4Notes[1].velocity}) vs soft E4 (${e4.velocity})`);
+});
+
 
 

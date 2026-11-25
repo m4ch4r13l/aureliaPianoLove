@@ -164,7 +164,7 @@ export function ControlDock({
 
       {/* Unified Bottom Control Dock — solid/translucent surface without backdrop-blur */}
       <div
-        className={`pointer-events-auto w-full max-w-[1080px] rounded-xl border border-white/12 bg-[#0f1116]/95 shadow-2xl transition-transform duration-200 ease-out ${
+        className={`pointer-events-auto w-full max-w-[1140px] rounded-xl border border-white/12 bg-[#0f1116]/95 shadow-2xl transition-transform duration-200 ease-out ${
           collapsed ? 'translate-y-[120%] hidden' : 'translate-y-0 block'
         }`}
       >
@@ -275,11 +275,11 @@ export function ControlDock({
 
           <div className="h-px w-full bg-white/8" />
 
-          {/* Row 2: Separated MIDI Instrument Mixer + Noise Cleanliness Filter */}
-          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 text-xs">
+          {/* Row 2: Separated MIDI Instrument Mixer + Engine Mode + Noise Cleanliness Filter */}
+          <div className="flex flex-wrap items-center justify-between gap-x-2.5 gap-y-2 text-xs">
             {/* 4 Independent Separated Instrument Track Toggles */}
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-[#9c968b] whitespace-nowrap">Pistas MIDI</span>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-[#9c968b] whitespace-nowrap">Pistas</span>
               <div
                 role="group"
                 aria-label="Separación de pistas por instrumento"
@@ -288,7 +288,9 @@ export function ControlDock({
                 {INSTRUMENT_TRACKS.map((inst) => {
                   const active = enabledTracks[inst.role];
                   const count = filteredNotes.filter((n) => n.track === inst.role).length;
-                  const isPianoPiece = currentPiece.transcriptionMode === 'piano';
+                  const isPianoPiece =
+                    currentPiece.transcriptionMode === 'piano-hd' ||
+                    currentPiece.transcriptionMode === 'piano';
                   const displayLabel =
                     isPianoPiece && inst.role === 'vocal'
                       ? 'Melodía'
@@ -324,7 +326,7 @@ export function ControlDock({
               </div>
             </div>
 
-            {/* MP3 Transcription Mode (Solo Piano vs Full Mixed Song) */}
+            {/* MP3 Transcription Engine Mode (ByteDance Piano IA vs Basic Pitch Fast vs Full Song) */}
             <div className="flex items-center gap-1.5">
               <span className="text-[#9c968b] whitespace-nowrap">Modo</span>
               <div
@@ -334,7 +336,8 @@ export function ControlDock({
               >
                 {(
                   [
-                    { id: 'piano', label: 'Piano' },
+                    { id: 'piano-hd', label: 'Piano IA' },
+                    { id: 'piano', label: 'Rápido' },
                     { id: 'song', label: 'Canción' },
                   ] as const
                 ).map((m) => (
@@ -397,7 +400,7 @@ export function ControlDock({
                 id="piece-select"
                 value={currentPiece.id}
                 onChange={(e) => onSelectPiece(e.target.value)}
-                className="h-7 max-w-[165px] truncate rounded-md border border-white/10 bg-[#171a22] px-2 text-xs font-medium text-[#f3efe7] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d4a353]"
+                className="h-7 max-w-[152px] truncate rounded-md border border-white/10 bg-[#171a22] px-2 text-xs font-medium text-[#f3efe7] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d4a353]"
               >
                 {pieces.map((p) => (
                   <option key={p.id} value={p.id} className="bg-[#14171f] text-[#f3efe7]">
@@ -519,7 +522,11 @@ export function ControlDock({
             {/* Quiet unboxed live notes readout */}
             <div className="flex flex-wrap items-center gap-2.5 text-[11px] text-[#9c968b]">
               <span>
-                {currentPiece.transcriptionMode === 'piano' ? 'Melodía' : 'Voz'}:{' '}
+                {currentPiece.transcriptionMode === 'piano-hd' ||
+                currentPiece.transcriptionMode === 'piano'
+                  ? 'Melodía'
+                  : 'Voz'}
+                :{' '}
                 <span data-testid="active-vocal-notes" className="font-mono-tabular text-[#f4d8dc]">
                   {formatRoleNotes(activeNotesByRole.vocal, 2)}
                 </span>
